@@ -52,6 +52,10 @@ try: SMTP_PORT=int(os.getenv("SMTP_PORT","465").strip() or 465)
 except ValueError: SMTP_PORT=465
 # Google shows App Passwords in groups of 4 with spaces; other servers' passwords may contain real spaces.
 if SMTP_HOST=="smtp.gmail.com": GMAIL_APP_PASSWORD=GMAIL_APP_PASSWORD.replace(" ","")
+# Optional separate sender for maintenance reports (same mail server). Unset = reports use GMAIL_SENDER.
+REPORT_SENDER=os.getenv("REPORT_SENDER","").strip()
+REPORT_SENDER_PASSWORD=os.getenv("REPORT_SENDER_PASSWORD","").strip()
+if SMTP_HOST=="smtp.gmail.com": REPORT_SENDER_PASSWORD=REPORT_SENDER_PASSWORD.replace(" ","")
 NOTIFICATIONS_ENABLED=os.getenv("NOTIFICATIONS_ENABLED","false").strip().lower() in ("1","true","yes","on")
 DEPLOYMENT_ROLE=os.getenv("DEPLOYMENT_ROLE","CLOUD-TEST").strip().upper() or "CLOUD-TEST"
 email_alarm_state={}
@@ -753,7 +757,7 @@ def create_audit_backup(reason="scheduled",actor="SYSTEM"):
         "created_utc":now.isoformat(),
         "created_pacific":now.astimezone(PLANT_TZ).isoformat(),
         "timezone":"America/Vancouver",
-        "version":"6.2.5",
+        "version":"6.2.6",
         "reason":reason,
         "actor":actor,
         "note":"Data/config backup only. Secrets in .env are intentionally excluded.",
@@ -859,7 +863,7 @@ async def build_audit_pdf(sn,date_text):
     deviations={str(r.get("episode_id")):r for r in load_deviations()}
 
     dataset={
-        "version":"6.2.5",
+        "version":"6.2.6",
         "date":selected.isoformat(),
         "timezone":"America/Vancouver",
         "logger_serials":serials,
@@ -1376,25 +1380,33 @@ def sms_alerts_ready(cfg=None):
     cfg=cfg or load_notification_config()
     return smtp_ready() and cfg["sms_enabled"] and bool(cfg["sms_recipients"])
 
-def _smtp_connect():
+REPORT_SENDER_NAME="ThermoIQ Reports"
+
+def report_account():
+    """(email, password) of the report sender, or None when reports use the alarm sender."""
+    return (REPORT_SENDER,REPORT_SENDER_PASSWORD) if REPORT_SENDER and REPORT_SENDER_PASSWORD else None
+
+def _smtp_connect(account=None):
+    user,password=account or (GMAIL_SENDER,GMAIL_APP_PASSWORD)
     if SMTP_PORT==465:
         smtp=smtplib.SMTP_SSL(SMTP_HOST,SMTP_PORT,timeout=20)
     else:
         smtp=smtplib.SMTP(SMTP_HOST,SMTP_PORT,timeout=20)
         smtp.starttls()
-    smtp.login(GMAIL_SENDER,GMAIL_APP_PASSWORD)
+    smtp.login(user,password)
     return smtp
 
-def _deliver(recipients,subject,body,attachments=None):
+def _deliver(recipients,subject,body,attachments=None,account=None,sender_name=None):
     """Send one message per recipient (recipients never see each other's address).
-    Returns (sent_count, [errors])."""
-    if not smtp_ready():
+    account=(email,password) sends from another account (reports). Returns (sent_count, [errors])."""
+    if not account and not smtp_ready():
         raise RuntimeError("Sender email is not configured in .env (GMAIL_SENDER / GMAIL_APP_PASSWORD)")
     if not recipients:
         raise RuntimeError("No recipients are configured on the Settings page")
-    sender=formataddr((load_notification_config()["sender_name"],GMAIL_SENDER))
+    from_addr=account[0] if account else GMAIL_SENDER
+    sender=formataddr((sender_name or load_notification_config()["sender_name"],from_addr))
     sent=0; errors=[]
-    with _smtp_connect() as smtp:
+    with _smtp_connect(account) as smtp:
         for to_addr in recipients:
             msg=EmailMessage(); msg["From"]=sender; msg["To"]=to_addr; msg["Subject"]=subject; msg.set_content(body)
             for filename,data,mime in (attachments or []):
@@ -1412,10 +1424,10 @@ def _result_text(sent,errors):
     total=sent+len(errors)
     return f"SENT {sent}/{total} · FAILED: {errors[0][:60]}"
 
-def send_email(subject,body,recipient=None,attachments=None):
+def send_email(subject,body,recipient=None,attachments=None,account=None,sender_name=None):
     """Email the alarm/report recipients (or the given address / list). Raises if nothing was delivered."""
     recipients=_split_addresses(recipient) if recipient else load_notification_config()["email_recipients"]
-    sent,errors=_deliver(recipients,subject,body,attachments)
+    sent,errors=_deliver(recipients,subject,body,attachments,account,sender_name)
     if not sent:
         raise RuntimeError(errors[0] if errors else "No email was sent")
     return sent,errors
@@ -1541,12 +1553,12 @@ LOGGERS={
 "22547310":{"id":"BP2","name":"Bagel Proofer 2","alarm_type":"low","limit":30.0},
 "22212731":{"id":"PLANT","name":"PBF Plant Temperature","model":"MX1101","alarm_type":"monitor","limit":0.0}}
 
-app=FastAPI(title="ThermoIQ - PBF Burnaby Temperature Dashboard v6.2.5 Cloud Edition")
+app=FastAPI(title="ThermoIQ - PBF Burnaby Temperature Dashboard v6.2.6 Cloud Edition")
 
 @app.get("/api/deployment-status")
 def api_deployment_status():
     return {
-        "version":"6.2.5",
+        "version":"6.2.6",
         "edition":"OVH Cloud",
         "deployment_role":DEPLOYMENT_ROLE,
         "automatic_notifications_enabled":NOTIFICATIONS_ENABLED,
@@ -1717,7 +1729,7 @@ async def v501_status():
     with event_lock:
         events = _read_json(EVENT_FILE, [])
     return {
-        "version": "6.2.5",
+        "version": "6.2.6",
         "logger_count": len(cur.get("devices", [])),
         "loggers": [{"name": d.get("name"), "logger_sn": d.get("logger_sn"), "comm_status": d.get("comm_status"), "age_minutes": d.get("age_minutes")} for d in cur.get("devices", [])],
         "alarm_event_count": len(events),
@@ -1880,6 +1892,7 @@ def notification_settings_payload():
             "sender_email":GMAIL_SENDER,
             "smtp_host":SMTP_HOST,
             "sender_configured":smtp_ready(),
+            "report_sender_email":REPORT_SENDER if report_account() else GMAIL_SENDER,
             "email_status":email_status,
             "text_status":text_status}
 
@@ -2099,7 +2112,7 @@ def audit_status(request: Request):
     now=datetime.now(timezone.utc)
     cfg=load_audit_config()
     return {
-        "version":"6.2.5",
+        "version":"6.2.6",
         "server_utc":now.isoformat(),
         "server_pacific":now.astimezone(PLANT_TZ).isoformat(),
         "timezone":"America/Vancouver",
@@ -2346,7 +2359,7 @@ async def build_maintenance_report_csv(hours=24,end_utc=None):
     output=io.StringIO(newline="")
     w=csv.writer(output)
     w.writerow(["PBF RISE BAKING BURNABY - TEMPERATURE ALARM DOWNTIME REPORT"])
-    w.writerow(["Report Version","v6.2.5"])
+    w.writerow(["Report Version","v6.2.6"])
     w.writerow(["Report Window Start (Pacific)",_pt_text(start_utc)])
     w.writerow(["Report Window End (Pacific)",_pt_text(end_utc)])
     w.writerow(["Window Hours",hours])
@@ -2485,20 +2498,101 @@ def build_all_logger_temperature_csv(temp_rows,start_utc,end_utc):
         ])
     return output.getvalue().encode("utf-8-sig")
 
+XLSX_MIME="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+
+def _sheet_title(name,used):
+    """Excel tab name: max 31 chars, no []:*?/\\ , unique within the workbook."""
+    base=re.sub(r"[\[\]:*?/\\]","-",str(name or "Logger")).strip()[:31] or "Logger"
+    title,n=base,2
+    while title.lower() in used:
+        suffix=f" ({n})"; title=base[:31-len(suffix)]+suffix; n+=1
+    used.add(title.lower())
+    return title
+
+def build_all_logger_temperature_xlsx(temp_rows,start_utc,end_utc):
+    """Temperature/humidity history as an Excel workbook: one worksheet per logger,
+    named after the logger, one row per reading time with temperature and humidity side by side.
+    Temperatures outside the logger's alarm limit are highlighted red."""
+    from openpyxl import Workbook
+    from openpyxl.styles import Font, PatternFill, Alignment
+    by_sn={}
+    for q in temp_rows:
+        t=_iso_dt(q.get("timestamp"))
+        if not t: continue
+        sn=str(q.get("logger_sn",""))
+        typ=str(q.get("sensor_measurement_type","")).lower()
+        try: val=round(float(q.get("value")),2)
+        except (TypeError,ValueError): continue
+        slot=by_sn.setdefault(sn,{}).setdefault(t,{})
+        slot["temp" if typ=="temperature" else "rh"]=val
+    order=[sn for sn in LOGGERS if sn in by_sn]+sorted(sn for sn in by_sn if sn not in LOGGERS)
+    wb=Workbook(); wb.remove(wb.active)
+    bold=Font(bold=True); title_font=Font(bold=True,size=13)
+    head_fill=PatternFill("solid",fgColor="1F3A4D"); head_font=Font(bold=True,color="FFFFFF")
+    alarm_fill=PatternFill("solid",fgColor="F8CBAD"); alarm_font=Font(bold=True,color="9C0006")
+    used=set()
+    if not order:
+        ws=wb.create_sheet("No Data")
+        ws.append(["No readings were returned for this reporting window."])
+    for sn in order:
+        meta=LOGGERS.get(sn,{})
+        name=meta.get("name",sn)
+        try: rc=get_runtime_cfg(sn) if sn in LOGGERS else {}
+        except Exception: rc={}
+        alarm_type=str(rc.get("alarm_type",meta.get("alarm_type",""))).lower()
+        limit=rc.get("limit")
+        ws=wb.create_sheet(_sheet_title(name,used))
+        ws.append([f"PBF RISE BAKING BURNABY - {name.upper()} TEMPERATURE HISTORY"]); ws["A1"].font=title_font
+        ws.append(["Logger",name]); ws.append(["Serial",sn])
+        if alarm_type in ("high","low") and limit is not None:
+            ws.append(["Alarm limit",f"{'Above' if alarm_type=='high' else 'Below'} {float(limit):.1f} C is out of limit (highlighted red)"])
+        else:
+            ws.append(["Alarm limit","Monitor only (no alarm limit)"])
+        ws.append(["Window Start (Pacific)",_pt_text(start_utc)])
+        ws.append(["Window End (Pacific)",_pt_text(end_utc)])
+        ws.append(["Reading Basis","Calibrated / offset-adjusted LI-COR readings"])
+        for r in range(2,ws.max_row+1): ws.cell(r,1).font=bold
+        temps=[v["temp"] for v in by_sn[sn].values() if "temp" in v]
+        if temps:
+            ws.append(["Min / Avg / Max (C)",f"{min(temps):.2f} / {sum(temps)/len(temps):.2f} / {max(temps):.2f}"])
+            ws.cell(ws.max_row,1).font=bold
+        ws.append([])
+        ws.append(["Date (Pacific)","Time (Pacific)","Temperature (C)","Humidity (%RH)"])
+        head_row=ws.max_row
+        for c in range(1,5):
+            cell=ws.cell(head_row,c); cell.font=head_font; cell.fill=head_fill
+            cell.alignment=Alignment(horizontal="center")
+        out_count=0
+        for t in sorted(by_sn[sn]):
+            v=by_sn[sn][t]; pt=t.astimezone(PLANT_TZ)
+            ws.append([pt.strftime("%Y-%m-%d"),pt.strftime("%I:%M:%S %p"),v.get("temp"),v.get("rh")])
+            temp=v.get("temp")
+            if temp is not None and limit is not None and (
+                (alarm_type=="high" and temp>float(limit)) or (alarm_type=="low" and temp<float(limit))):
+                cell=ws.cell(ws.max_row,3); cell.fill=alarm_fill; cell.font=alarm_font; out_count+=1
+            ws.cell(ws.max_row,3).number_format="0.00"; ws.cell(ws.max_row,4).number_format="0.00"
+        if alarm_type in ("high","low") and limit is not None:
+            ws.cell(4,3,f"{out_count} out-of-limit reading(s)").font=alarm_font if out_count else bold
+        ws.freeze_panes=ws.cell(head_row+1,1)
+        ws.auto_filter.ref=f"A{head_row}:D{ws.max_row}"
+        for col,width in zip("ABCD",(22,16,17,16)): ws.column_dimensions[col].width=width
+    buf=io.BytesIO(); wb.save(buf)
+    return buf.getvalue()
+
 async def send_maintenance_report(hours=None,recipient=None,manual=False):
     cfg=load_report_config()
     hours=int(hours or cfg.get("hours",24))
     to_addr=(recipient or cfg.get("recipient") or ", ".join(load_notification_config()["email_recipients"])).strip()
     report_bytes,report_name,temp_rows,api_error,start_utc,end_utc=await build_maintenance_report_csv(hours)
-    temp_bytes=build_all_logger_temperature_csv(temp_rows,start_utc,end_utc)
-    temp_name=f"PBF_All_Logger_Temperature_History_{hours}h_{end_utc.astimezone(PLANT_TZ).strftime('%Y%m%d_%H%M')}.csv"
+    temp_bytes=build_all_logger_temperature_xlsx(temp_rows,start_utc,end_utc)
+    temp_name=f"PBF_All_Logger_Temperature_History_{hours}h_{end_utc.astimezone(PLANT_TZ).strftime('%Y%m%d_%H%M')}.xlsx"
     body=(
         "PBF RISE BAKING BURNABY - TEMPERATURE MAINTENANCE REPORT\n\n"
         f"Reporting window: {_pt_text(start_utc)} to {_pt_text(end_utc)}\n"
         f"Duration: {hours} hours\n"
         "Attached:\n"
         "1. Temperature alarm downtime report: daily event count, downtime duration, availability, and alarm audit trail.\n"
-        "2. All-logger temperature/humidity history for the same reporting window.\n\n"
+        "2. Temperature/humidity history workbook (Excel): one worksheet per logger, out-of-limit readings in red.\n\n"
         "Purpose: maintenance performance validation and temperature downtime history."
     )
     if api_error:
@@ -2506,9 +2600,10 @@ async def send_maintenance_report(hours=None,recipient=None,manual=False):
     subject=f"PBF 24H Temperature Downtime Report - {end_utc.astimezone(PLANT_TZ).strftime('%Y-%m-%d')}"
     attachments=[
         (report_name,report_bytes,"text/csv"),
-        (temp_name,temp_bytes,"text/csv"),
+        (temp_name,temp_bytes,XLSX_MIME),
     ]
-    await asyncio.to_thread(send_email,subject,body,to_addr,attachments)
+    acct=report_account()
+    await asyncio.to_thread(send_email,subject,body,to_addr,attachments,acct,REPORT_SENDER_NAME if acct else None)
     add_event("REPORT","Maintenance Report","24H MAINTENANCE REPORT EMAILED",
               detail=f"Sent to {to_addr}; {hours}h window; manual={manual}")
     return {"ok":True,"recipient":to_addr,"hours":hours,"report_file":report_name,"temperature_file":temp_name}
@@ -2561,6 +2656,18 @@ async def maintenance_report_download(hours:int=24):
         media_type="text/csv; charset=utf-8",
         headers={"Content-Disposition":f'attachment; filename="{filename}"'}
     )
+
+@app.get("/api/temperature-history-all.xlsx")
+async def temperature_history_all_xlsx(hours:int=24):
+    hours=max(1,min(168,int(hours)))
+    end_utc=datetime.now(timezone.utc).replace(microsecond=0)
+    start_utc=end_utc-timedelta(hours=hours)
+    rows=await get_report_history_all(start_utc,end_utc)
+    content=await asyncio.to_thread(build_all_logger_temperature_xlsx,rows,start_utc,end_utc)
+    filename=f"PBF_All_Logger_Temperature_History_{hours}h_{end_utc.astimezone(PLANT_TZ).strftime('%Y%m%d_%H%M')}.xlsx"
+    from fastapi.responses import Response
+    return Response(content=content,media_type=XLSX_MIME,
+                    headers={"Content-Disposition":f'attachment; filename="{filename}"'})
 
 @app.get("/api/temperature-history-all.csv")
 async def temperature_history_all_download(hours:int=24):

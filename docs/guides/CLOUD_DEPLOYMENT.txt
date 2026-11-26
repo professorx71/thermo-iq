@@ -1,5 +1,5 @@
 PBF Rise Baking Burnaby Temperature Dashboard
-v6.2.5 OVH Cloud Edition
+v6.2.6 OVH Cloud Edition
 
 ARCHITECTURE
 LI-COR Cloud -> OVH VPS -> PBF Dashboard -> email/text messages
@@ -53,6 +53,15 @@ After IT/DNS gives you a domain/subdomain pointing to the VPS:
 3. Caddy automatically obtains and renews HTTPS certificates.
 4. The whole dashboard is protected by Caddy basic authentication over HTTPS.
 5. Settings still has separate Admin/Operator role protection.
+
+PRODUCTION DOMAIN: https://thermoiq.octaveworks.com
+The production VPS also hosts other sites and runs Caddy as a system service
+(/etc/caddy/Caddyfile, certbot certificates). Use cloud/add_domain.sh there, not
+enable_https.sh:
+  scp cloud/add_domain.sh ubuntu@148.113.244.247:/tmp/
+  ssh -t ubuntu@148.113.244.247 "sudo bash /tmp/add_domain.sh thermoiq.octaveworks.com"
+It backs up the Caddyfile (restored automatically if invalid), gets a Let's Encrypt
+certificate with an auto-renew hook, and reuses the existing viewer login.
 
 GO-LIVE
 Only after cloud tests pass:

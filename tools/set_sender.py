@@ -1,4 +1,5 @@
-"""Change the alarm SENDER account (GMAIL_SENDER / GMAIL_APP_PASSWORD / SMTP_HOST / SMTP_PORT)
+"""Change the alarm SENDER account (GMAIL_SENDER / GMAIL_APP_PASSWORD / SMTP_HOST / SMTP_PORT),
+or with --report the maintenance-report sender (REPORT_SENDER / REPORT_SENDER_PASSWORD),
 in the local .env and on the cloud server, after checking that the login works.
 
 The password is typed here (hidden) and is never printed. Nothing is changed unless the
@@ -6,6 +7,7 @@ login test succeeds. Each .env is backed up first (.env.bak-YYYYMMDD-HHMMSS).
 
 usage:
   python tools/set_sender.py --email alarm@octaveworks.com --host mail.octaveworks.com
+  python tools/set_sender.py --report --email reports@octaveworks.com --host mail.octaveworks.com
   options: --port 465|587   --local-only   --server-only
            --server ubuntu@148.113.244.247   --root /opt/pbf-temp-dashboard
 """
@@ -90,6 +92,8 @@ def main():
     ap.add_argument("--port", type=int, default=465, choices=[465, 587])
     ap.add_argument("--server", default="ubuntu@148.113.244.247")
     ap.add_argument("--root", default="/opt/pbf-temp-dashboard")
+    ap.add_argument("--report", action="store_true",
+                    help="set the REPORT sender (REPORT_SENDER), not the alarm sender; must use the same mail server")
     g = ap.add_mutually_exclusive_group()
     g.add_argument("--local-only", action="store_true")
     g.add_argument("--server-only", action="store_true")
@@ -116,8 +120,11 @@ def main():
     print("Login OK")
 
     # single quotes = literal value for python-dotenv (safe for # $ and spaces)
-    values = {"GMAIL_SENDER": email, "GMAIL_APP_PASSWORD": f"'{password}'",
-              "SMTP_HOST": host, "SMTP_PORT": str(a.port)}
+    if a.report:   # report sender shares SMTP_HOST/SMTP_PORT with the alarm sender
+        values = {"REPORT_SENDER": email, "REPORT_SENDER_PASSWORD": f"'{password}'"}
+    else:
+        values = {"GMAIL_SENDER": email, "GMAIL_APP_PASSWORD": f"'{password}'",
+                  "SMTP_HOST": host, "SMTP_PORT": str(a.port)}
 
     if not a.server_only:
         ns = {}; exec(EDIT_ENV, ns)
@@ -133,7 +140,8 @@ def main():
         print(f"Updating {a.server}:{a.root}/.env ...")
         r = subprocess.run(["ssh", a.server, "python3 -"], input=script.encode())
         if r.returncode: sys.exit(f"Server update failed (exit {r.returncode}).")
-    print("Done. In Settings, click 'Send Test Email' to confirm the new sender.")
+    print("Done. In Settings, click " + ("'Email Report Now'" if a.report else "'Send Test Email'")
+          + " to confirm the new sender.")
 
 if __name__ == "__main__":
     main()

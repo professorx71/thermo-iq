@@ -172,16 +172,16 @@ try {
             Add-RequiredUpdate $updates $path $versionPattern $New
         }
         Add-RequiredUpdate $updates '.env.cloud.example' `
-            '(?m)^(# ===== PBF Temperature Dashboard v)\d+\.\d+\.\d+( Cloud Edition =====)$' `
+            '(?m)^(# ===== PBF Temperature Dashboard v)\d+\.\d+\.\d+( Cloud Edition =====)(?=\r?$)' `
             ('${1}' + $New + '${2}')
         Add-RequiredUpdate $updates 'cloud/deploy_cloud.sh' `
-            '(?m)^(echo "Building PBF Temperature Dashboard v)\d+\.\d+\.\d+( Cloud Edition\.\.\.")$' `
+            '(?m)^(echo "Building PBF Temperature Dashboard v)\d+\.\d+\.\d+( Cloud Edition\.\.\.")(?=\r?$)' `
             ('${1}' + $New + '${2}')
         Add-RequiredUpdate $updates 'docs/guides/CLOUD_DEPLOYMENT.txt' `
-            '(?m)^(v)\d+\.\d+\.\d+( OVH Cloud Edition)$' `
+            '(?m)^(v)\d+\.\d+\.\d+( OVH Cloud Edition)(?=\r?$)' `
             ('${1}' + $New + '${2}')
         Add-RequiredUpdate $updates 'README.md' `
-            '(?m)^(\*\*Current version: v)\d+\.\d+\.\d+( \(Cloud Edition\)\*\*)$' `
+            '(?m)^(\*\*Current version: v)\d+\.\d+\.\d+( \(Cloud Edition\)\*\*)(?=\r?$)' `
             ('${1}' + $New + '${2}')
 
         $readme = $updates['README.md']

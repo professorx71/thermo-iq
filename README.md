@@ -2,7 +2,7 @@
 
 # ThermoIQ: PBF Rise Baking Burnaby Temperature Monitoring
 
-**Current version: v6.2.5 (Cloud Edition)**
+**Current version: v6.2.6 (Cloud Edition)**
 
 A web dashboard that monitors the plant's coolers and proofers through **LI-COR HOBO loggers**. It reads live temperature and humidity from **LI-COR Cloud** and raises alarms when a reading goes past its limit. Alarms are sent by email and text message, to recipients managed on the Settings page. The dashboard also shows trends, exports CSV and PDF reports, and keeps an audit trail with calibration and deviation records.
 
@@ -39,15 +39,16 @@ A web dashboard that monitors the plant's coolers and proofers through **LI-COR 
 8. [User accounts and access](#user-accounts-and-access)
 9. [Alarm logic](#alarm-logic)
 10. [Notifications](#notifications)
-11. [Data storage and backups](#data-storage-and-backups)
+11. [Reports](#reports)
+12. [Data storage and backups](#data-storage-and-backups)
     - [How to back up from the dashboard](#how-to-back-up-from-the-dashboard)
     - [Backing up without the browser](#backing-up-without-the-browser)
     - [Restoring a backup](#restoring-a-backup)
-12. [Web pages](#web-pages)
-13. [API reference](#api-reference)
-14. [Troubleshooting](#troubleshooting)
-15. [Security notes](#security-notes)
-16. [Version history](#version-history)
+13. [Web pages](#web-pages)
+14. [API reference](#api-reference)
+15. [Troubleshooting](#troubleshooting)
+16. [Security notes](#security-notes)
+17. [Version history](#version-history)
 
 ---
 
@@ -144,6 +145,7 @@ thermoiq/
 | HTTP client | **httpx**: calls the LI-COR Cloud API |
 | Config | **python-dotenv**: loads `.env` |
 | PDF reports | **reportlab**: PDF generation and encryption |
+| Excel reports | **openpyxl**: per-logger temperature history workbook |
 | TLS on corporate networks | **truststore**: uses the Windows certificate store |
 | Time zones | **tzdata** / `zoneinfo` (plant time zone: `America/Vancouver`) |
 | Email | Python `smtplib` → Gmail SMTP (SSL, port 465) by default; any SMTP server via `SMTP_HOST`/`SMTP_PORT` |
@@ -226,6 +228,8 @@ Create `.env` in the **project root** (next to `requirements.txt`) by copying `.
 | `SMTP_HOST` | No | `smtp.gmail.com` | Mail server, for a non-Gmail sender |
 | `SMTP_PORT` | No | `465` | `465` = SSL; any other port uses STARTTLS (e.g. `587`) |
 | `ALERT_EMAIL` | No | none | Starting email recipient(s), comma-separated. Used only until recipients are saved on the Settings page |
+| `REPORT_SENDER` | No | none | Separate sender for the maintenance report (e.g. `reports@octaveworks.com`), same mail server. Unset = reports come from `GMAIL_SENDER` |
+| `REPORT_SENDER_PASSWORD` | With `REPORT_SENDER` | none | Password for `REPORT_SENDER` |
 | `NOTIFICATIONS_ENABLED` | No | `false` | `true` sends automatic alarm emails and texts |
 | `DEPLOYMENT_ROLE` | No | `CLOUD-TEST` | Label shown in the UI, e.g. `CLOUD-PRIMARY` or `CLOUD-TEST` |
 | `ADMIN_USERNAME` | No | `admin` | Admin login name |
@@ -298,6 +302,11 @@ ssh -L 8000:127.0.0.1:8000 ubuntu@YOUR_VPS_IP
 ./cloud/enable_https.sh   # asks for the domain, viewer username and viewer password; writes cloud/Caddyfile
 ```
 Caddy obtains and renews certificates automatically. Every page is protected by Caddy basic auth, and the Settings page still requires its own Admin/Operator login.
+
+**Production address: https://thermoiq.octaveworks.com.** The production VPS also hosts other sites, so it runs Caddy as a system service (`/etc/caddy/Caddyfile`) with certbot certificates instead of `enable_https.sh`. To add or move the domain there, run `cloud/add_domain.sh`. It backs up the Caddyfile, gets the certificate, adds a renewal hook and reuses the existing viewer login:
+```bash
+scp cloud/add_domain.sh ubuntu@148.113.244.247:/tmp/ && ssh -t ubuntu@148.113.244.247 "sudo bash /tmp/add_domain.sh thermoiq.octaveworks.com"
+```
 
 **Go-live checklist:**
 1. Turn off automatic email/text alarms on the mini-PC backup.
@@ -538,7 +547,75 @@ Each logger card on the Settings page has an **Alarm Notification Scheduler** (A
 
 Buttons: **Copy Mon → Tue–Fri**, **Copy Mon → every day**, **Preset: Mon–Fri 24 h**, and **Apply this schedule to ALL loggers**. Readings are still displayed and logged while alarms are scheduled OFF. Schedules saved by v6.2.x are converted automatically.
 
-**Daily maintenance/downtime report:** configured in Settings (Admin). It is emailed automatically once a day and can also be sent on demand.
+The daily maintenance report is described in [Reports](#reports).
+
+---
+
+## Reports
+
+### Daily maintenance report (email)
+
+Once a day the dashboard emails a maintenance report with **two attachments**:
+
+| Attachment | Format | Contents |
+|---|---|---|
+| `PBF_Temperature_Downtime_24h_YYYYMMDD_HHMM.csv` | CSV | Temperature-alarm downtime report (sections listed below) |
+| `PBF_All_Logger_Temperature_History_24h_YYYYMMDD_HHMM.xlsx` | Excel workbook | Temperature and humidity history, **one worksheet per logger** |
+
+**Settings** (Settings page → Daily Maintenance Report, Admin only):
+
+| Setting | Meaning |
+|---|---|
+| **Daily report** | ENABLED / DISABLED |
+| **Send time** | Time of day, Pacific Time (default 08:00) |
+| **Recipient email(s)** | One or more addresses, separated by commas. Blank = the `ALERT_EMAIL` address from `.env` |
+| **Report window** | Last 24 hours, 48 hours or 7 days |
+| **Email Report Now** | Sends the report immediately with the saved settings, e.g. as a test |
+
+**When it is sent automatically:** once per day, at or after the send time, and only on the server where **all** of these are true:
+- `DEPLOYMENT_ROLE=CLOUD-PRIMARY`;
+- `NOTIFICATIONS_ENABLED=true`;
+- the sender account in `.env` is set.
+
+This stops the mini-PC backup and test installs from sending duplicates. If the server is down at the send time, the report goes out as soon as it is running again that day. **Email Report Now** works on any install.
+
+**Who it comes from:** `REPORT_SENDER` (e.g. `reports@octaveworks.com`, display name *ThermoIQ Reports*) if `REPORT_SENDER` and `REPORT_SENDER_PASSWORD` are set in `.env`; otherwise the alarm sender (`GMAIL_SENDER`). Set it with:
+```
+.\windows\SET_SENDER_EMAIL.bat --report --email reports@octaveworks.com --host mail.octaveworks.com
+```
+The script tests the login first, then updates both the local and the server `.env`.
+
+### Downtime report (CSV)
+
+| Section | Contents |
+|---|---|
+| Header | Report window (Pacific), window length, reading basis (calibrated readings) |
+| **LOGGER SUMMARY** | Per logger: alarm events, downtime minutes, availability, min/avg/max temperature |
+| **DAILY LOGGER SUMMARY** | The same figures per logger per day |
+| **DOWNTIME HISTORY** | Each alarm episode: start, end (or OPEN), downtime inside the window, full duration, start/worst/recovery temperature, how it ended |
+| **ALARM EVENT AUDIT TRAIL** | Every alarm event in the window, with the email and text-message delivery result |
+
+### Temperature history workbook (Excel)
+
+- **One worksheet per logger**, and each tab is named after the logger: *Tortilla L1 Cooler*, *Tortilla L2 Cooler*, *Tortilla L3 Cooler*, *Bagel Cooler*, *Bagel Proofer 1*, *Bagel Proofer 2*, *PBF Plant Temperature*.
+- **Top of each sheet:** logger name, serial, alarm limit, report window, the number of out-of-limit readings, and min / avg / max temperature.
+- **Data:** one row per reading time, **Date · Time · Temperature (C) · Humidity (%RH)**, stored as numbers so they can be sorted, filtered and charted.
+- **Temperatures past the alarm limit are highlighted red.** The plant-temperature logger is monitor-only and has no limit.
+- The header row stays visible while scrolling, and every column has a filter.
+- All times are Pacific Time and all readings include the calibration offsets.
+
+### Downloading reports from the dashboard
+
+| Where | Button / link | File |
+|---|---|---|
+| **Alarm & Event History** (`/events`) | Download 24H Downtime CSV / 30-Day Downtime CSV | Downtime report |
+| **Alarm & Event History** (`/events`) | Download 24H Temperature CSV | Temperature history, all loggers in one CSV |
+| Browser address bar | `/api/temperature-history-all.xlsx?hours=24` (1–168) | Temperature history workbook, one sheet per logger |
+| **Trends** (`/trends`) | Download 24 Hours / Selected Date CSV | Temperature + humidity for the selected range or date |
+| **Audit** (`/audit`) | Download Modification-Restricted PDF | Audit report PDF for one logger and date |
+| **Audit** (`/audit`) | Download Audit Trail CSV | Full audit trail |
+
+Every report email is recorded in the event log as **24H MAINTENANCE REPORT EMAILED**, with the recipients and window. The send status and last error are kept in `data/maintenance_report_state.json`.
 
 ---
 
@@ -662,6 +739,7 @@ All endpoints are in [app/server.py](app/server.py). Endpoints marked 🔒 need 
 | GET | `/api/download-range/{sn}` | CSV for a date range |
 | GET | `/api/download-range-all.csv` | CSV for a date range, all loggers |
 | GET | `/api/temperature-history-all.csv` | Temperature history, all loggers |
+| GET | `/api/temperature-history-all.xlsx` | Temperature history workbook: one worksheet per logger (also attached to the maintenance report email) |
 | GET | `/api/maintenance-report.csv` | Maintenance/downtime report |
 | GET | `/api/download-test/{sn}` | Diagnostic test of the LI-COR download |
 
@@ -717,6 +795,8 @@ FastAPI's interactive API docs are also at **`/docs`** while the app is running.
 | Old page after an update | Press **Ctrl+F5** |
 | No emails | Click **Send Test Email** in Settings; Gmail needs an **App Password**, not your normal password; check `NOTIFICATIONS_ENABLED` |
 | No text messages | Click **Send Test Text**; check the carrier domain in [the guide](docs/guides/TEXT_MESSAGE_SETUP.txt). Some carriers delay or block gateway texts |
+| Daily report not arriving | Only the server with `DEPLOYMENT_ROLE=CLOUD-PRIMARY` and `NOTIFICATIONS_ENABLED=true` sends it. Check that **Daily report** is ENABLED, then click **Email Report Now**; the last error is in `data/maintenance_report_state.json`. Look in the spam folder too |
+| Report sender login rejected | Re-run `windows\SET_SENDER_EMAIL.bat --report ...`; `REPORT_SENDER` must be a mailbox on the same mail server as `SMTP_HOST` |
 | Duplicate alarms | Both the cloud and the mini-PC have `NOTIFICATIONS_ENABLED=true`. Turn it off on one of them |
 | Cannot log in to Settings | Run `python tools/check_auth_config.py`; reset with `windows\SET_ADMIN_PASSWORD.bat` |
 | Other LAN devices can't connect | Run `windows\enable_lan_firewall.bat` as admin; use the address from `windows\DASHBOARD_STATUS.bat` |
@@ -749,6 +829,7 @@ Version-specific fixes are documented in [docs/release-notes/](docs/release-note
 | v5.3 | Admin password changes, cache fix, weekday/24 h scheduler, calibration and roles, plant logger |
 | v6.0 | Cloud edition (Docker/Caddy), username/password rules, auth fixes |
 | v6.1 | Maintenance downtime report, 7-day trend download, calendar history export |
+| **v6.2.6** | Reports format and add reports email |
 | **v6.2.5** | Remove design credit |
 | **v6.2.4** | add sender email |
 | **v6.2.3** | setting and alarm scheduler |

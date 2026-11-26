@@ -1,0 +1,4 @@
+ThermoIQ release v6.2.6
+Released 2026-11-26.
+
+- Reports format and add reports email

@@ -265,7 +265,7 @@ const SMS_CARRIERS=[
 function lines(id){return $(id).value.split(/[\s,;]+/).map(s=>s.trim()).filter(Boolean);}
 function fillNotifications(n){
   $("senderLine").innerHTML=n.sender_configured
-    ? `Sent from <b>${escapeHtml(n.sender_name)}</b> &lt;${escapeHtml(n.sender_email)}&gt; via ${escapeHtml(n.smtp_host)}`
+    ? `Alarms sent from <b>${escapeHtml(n.sender_name)}</b> &lt;${escapeHtml(n.sender_email)}&gt; via ${escapeHtml(n.smtp_host)}<br>Reports sent from &lt;${escapeHtml(n.report_sender_email||n.sender_email)}&gt;`
     : '<span class="bad">No sending account. Set GMAIL_SENDER and GMAIL_APP_PASSWORD in .env, then restart.</span>';
   $("senderName").value=n.sender_name||"ThermoIQ Alerts";
   $("emailEnabled").value=n.email_enabled?"on":"off";
