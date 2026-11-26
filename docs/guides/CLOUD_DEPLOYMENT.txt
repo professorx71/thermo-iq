@@ -1,0 +1,65 @@
+PBF Rise Baking Burnaby Temperature Dashboard
+v6.2.0 OVH Cloud Edition
+
+ARCHITECTURE
+LI-COR Cloud -> OVH VPS -> PBF Dashboard -> Gmail/ntfy
+GMKtec mini-PC remains local backup.
+
+SAFETY DEFAULT
+NOTIFICATIONS_ENABLED=false
+This prevents duplicate automatic alarms while the existing mini-PC remains active.
+Manual dashboard testing can be completed before cloud notifications are enabled.
+
+INITIAL DEPLOYMENT
+1. Install Docker + Docker Compose on Ubuntu 24.04.
+2. Upload this folder to /opt/pbf-temp-dashboard.
+3. Create .env (project root) from .env.cloud.example and enter private credentials.
+4. Run: ./cloud/deploy_cloud.sh
+5. The FastAPI app binds only to 127.0.0.1:8000 on the VPS.
+6. From Windows create an SSH tunnel:
+   ssh -L 8000:127.0.0.1:8000 ubuntu@YOUR_VPS_IP
+7. Open http://localhost:8000 and verify all seven loggers.
+
+VERSIONED RELEASES (Windows)
+After the first install, use the repository-root release.cmd to create and deploy
+tagged updates to ubuntu@148.113.244.247. The default install root is
+/opt/pbf-temp-dashboard, matching the initial setup above.
+
+1. Commit the application changes and the release tooling; the worktree must be clean.
+2. Preview the version/files without changing anything:
+     .\release.cmd -DryRun
+3. Create a patch release and deploy it:
+     .\release.cmd -Notes "Improved audit exports"
+   Or select a semver explicitly:
+     .\release.cmd -Version 6.3.0 -Notes "Quarterly release"
+4. The script updates the application/UI cache versions, adds a release note,
+   commits and tags only those version files, then packages the tag. Type CREATE
+   and later DEPLOY at the prompts to authorize those steps.
+5. To deploy an existing local tag without creating a new version:
+     .\release.cmd -DeployOnly -Version 6.2.1
+
+The script does not push to GitHub. It refuses to release a dirty worktree or a
+tag containing .env/runtime data. The server must have Docker Compose, SSH access,
+and its configured /opt/pbf-temp-dashboard/.env. Releases use versioned folders;
+the existing .env and data/ remain at the install root. The prior release is
+restored if the new container does not pass its health checks.
+
+PUBLIC HTTPS
+After IT/DNS gives you a domain/subdomain pointing to the VPS:
+1. Run: ./cloud/enable_https.sh
+2. Enter the domain, viewer username, and a strong viewer password.
+3. Caddy automatically obtains and renews HTTPS certificates.
+4. The whole dashboard is protected by Caddy basic authentication over HTTPS.
+5. Settings still has separate Admin/Operator role protection.
+
+GO-LIVE
+Only after cloud tests pass:
+- Disable automatic Gmail/ntfy alarms on the GMKtec backup.
+- Change cloud .env to:
+    NOTIFICATIONS_ENABLED=true
+    DEPLOYMENT_ROLE=CLOUD-PRIMARY
+- Restart: cd cloud && docker compose restart dashboard
+
+DATA
+Persistent alarm/config/event files are stored in ./data on the VPS and are included
+in OVH server backups.

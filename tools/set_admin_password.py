@@ -1,10 +1,10 @@
 from pathlib import Path
 import getpass, hashlib, secrets, base64, re, json
 
-BASE=Path(__file__).parent
+BASE=Path(__file__).resolve().parent.parent  # project root
 ENV=BASE/".env"
 if not ENV.exists():
-    print("ERROR: .env not found. Copy your working .env into this folder first.")
+    print("ERROR: .env not found. Copy your working .env into the project root folder first.")
     raise SystemExit(1)
 
 username=input("Admin username [admin]: ").strip() or "admin"

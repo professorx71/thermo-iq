@@ -33,11 +33,11 @@ PREPARE THE MINI-PC
 
 INSTALL
 -------
-1. Right-click INSTALL_ALWAYS_ON_MINIPC.bat
+1. Right-click windows/INSTALL_ALWAYS_ON_MINIPC.bat
 2. Choose Run as administrator.
 3. Wait until SETUP COMPLETE appears.
-4. Run OPEN_DASHBOARD.bat.
-5. Run DASHBOARD_STATUS.bat to verify the task and web server.
+4. Run windows/OPEN_DASHBOARD.bat.
+5. Run windows/DASHBOARD_STATUS.bat to verify the task and web server.
 
 BIOS / POWER FAILURE
 --------------------
@@ -72,10 +72,10 @@ No Command Prompt needs to stay open.
 The dashboard runs under Windows Task Scheduler as SYSTEM.
 
 Useful files:
-- OPEN_DASHBOARD.bat
-- DASHBOARD_STATUS.bat
-- RESTART_DASHBOARD.ps1
-- SHOW_NETWORK_INFO.bat
+- windows/OPEN_DASHBOARD.bat
+- windows/DASHBOARD_STATUS.bat
+- windows/RESTART_ALWAYS_ON_DASHBOARD.bat
+- windows/SHOW_NETWORK_INFO.bat
 - logs\
 
 SECURITY

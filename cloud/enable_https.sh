@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
-cd "$(dirname "$0")"
+cd "$(dirname "$0")"   # cloud/ — Caddyfile is written here
 
 read -rp "Dashboard domain (example pbf-temp.company.com): " DOMAIN
 read -rp "Viewer username [pbfviewer]: " VIEWUSER

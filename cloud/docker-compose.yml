@@ -1,6 +1,12 @@
+# Fixed project name so containers/volumes keep the same names
+# regardless of which folder the compose file lives in.
+name: pbf-temp-dashboard
+
 services:
   dashboard:
-    build: .
+    build:
+      context: ..
+      dockerfile: cloud/Dockerfile
     container_name: pbf-temp-dashboard
     restart: unless-stopped
     environment:
@@ -8,8 +14,8 @@ services:
     ports:
       - "127.0.0.1:8000:8000"
     volumes:
-      - ./data:/app/data
-      - ./.env:/app/.env
+      - ../data:/app/data
+      - ../.env:/app/.env
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/', timeout=5).read()"]
       interval: 30s

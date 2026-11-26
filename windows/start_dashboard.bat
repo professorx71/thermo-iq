@@ -1,11 +1,11 @@
 @echo off
-cd /d "%~dp0"
+cd /d "%~dp0.."
 title PBF Rise Baking Burnaby Dashboard v6.0.0
 
 if not exist ".env" (
  echo.
  echo ERROR: .env not found.
- echo Copy your existing private .env into this v6.0.0 folder.
+ echo Copy your existing private .env into the project root folder.
  echo.
  pause
  exit /b 1
@@ -20,7 +20,7 @@ if not exist ".venv\Scripts\python.exe" (
  echo The dedicated Python environment has not been installed yet.
  echo.
  echo RIGHT-CLICK:
- echo     INSTALL_ALWAYS_ON_MINIPC.bat
+ echo     windows\INSTALL_ALWAYS_ON_MINIPC.bat
  echo and choose:
  echo     Run as administrator
  echo.
@@ -32,7 +32,7 @@ if not exist ".venv\Scripts\python.exe" (
  exit /b 2
 )
 
-set "PYTHON=%~dp0.venv\Scripts\python.exe"
+set "PYTHON=%CD%\.venv\Scripts\python.exe"
 
 "%PYTHON%" -c "import uvicorn, fastapi, httpx, dotenv" >nul 2>&1
 if errorlevel 1 (
@@ -44,7 +44,7 @@ if errorlevel 1 (
  if errorlevel 1 (
    echo.
    echo ERROR: Package installation failed.
-   echo Run INSTALL_ALWAYS_ON_MINIPC.bat as Administrator.
+   echo Run windows\INSTALL_ALWAYS_ON_MINIPC.bat as Administrator.
    pause
    exit /b 3
  )
@@ -70,7 +70,7 @@ echo Press CTRL+C to stop this manual server.
 echo ============================================================
 echo.
 
-"%PYTHON%" -m uvicorn server:app --host 0.0.0.0 --port 8000
+"%PYTHON%" -m uvicorn server:app --app-dir app --host 0.0.0.0 --port 8000
 echo.
 echo Dashboard server stopped.
 pause

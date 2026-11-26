@@ -3,8 +3,8 @@ PBF LI-COR Dashboard v5.1.3 — LAN Access
 1. Stop all older dashboard Command Prompt windows.
 2. Extract v5.1.3 into a NEW folder.
 3. Copy your private .env into the new folder.
-4. Double-click enable_lan_firewall.bat ONCE and approve Windows UAC.
-5. Double-click start_dashboard.bat.
+4. Double-click windows/enable_lan_firewall.bat ONCE and approve Windows UAC.
+5. Double-click windows/start_dashboard.bat.
 6. The window prints the PC LAN address, such as http://192.168.2.50:8000
 7. On an iPhone/tablet/PC on the SAME network, open that address.
 

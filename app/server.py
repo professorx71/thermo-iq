@@ -37,7 +37,8 @@ except Exception as e:
     print("Windows trust store support unavailable:", repr(e))
 
 
-BASE=Path(__file__).parent
+APP_DIR=Path(__file__).resolve().parent   # app/ (code + static files)
+BASE=APP_DIR.parent                       # project root (.env, data/)
 load_dotenv(BASE/".env", override=True, interpolate=False)
 TOKEN=os.getenv("LICOR_API_TOKEN","").strip()
 API=os.getenv("LICOR_API_BASE","https://api.licor.cloud").rstrip("/")
@@ -374,7 +375,7 @@ def _write_json(path, obj):
     tmp.write_text(json.dumps(obj,indent=2),encoding="utf-8")
     tmp.replace(path)
 
-audit_lock=threading.Lock()
+audit_lock=threading.RLock()  # re-entrant: matches the production hotfix on the VPS
 
 def load_audit_config():
     default={
@@ -441,6 +442,8 @@ def _record_time(rec):
     return None
 
 def _prune_list_by_retention(rows,years=None):
+    # NOTE: when years is None this calls load_audit_config(), which takes
+    # audit_lock. Callers holding audit_lock MUST pass years explicitly.
     if not isinstance(rows,list):
         return []
     years=years or load_audit_config().get("retention_years",3)
@@ -471,12 +474,15 @@ def append_audit_record(action, *, category="SYSTEM", actor="SYSTEM", role="syst
     }
     if isinstance(extra,dict):
         rec["extra"]=extra
+    # Read retention BEFORE taking audit_lock: load_audit_config() takes audit_lock
+    # itself, and threading.Lock is not re-entrant (doing it inside = deadlock).
+    years=load_audit_config().get("retention_years",3)
     with audit_lock:
         rows=_read_json(AUDIT_FILE,[])
         if not isinstance(rows,list):
             rows=[]
         rows.append(rec)
-        rows=_prune_list_by_retention(rows)
+        rows=_prune_list_by_retention(rows,years)
         _write_json(AUDIT_FILE,rows)
     return rec["id"]
 
@@ -625,8 +631,9 @@ def save_deviation(data,actor,role):
         rows=[rec if r is existing else r for r in rows]
     else:
         rows.append(rec)
+    years=load_audit_config().get("retention_years",3)  # outside audit_lock (see append_audit_record)
     with audit_lock:
-        _write_json(DEVIATION_FILE,_prune_list_by_retention(rows))
+        _write_json(DEVIATION_FILE,_prune_list_by_retention(rows,years))
     return rec
 
 def mark_active_downtime_ack(sn,who,when_utc):
@@ -1391,10 +1398,10 @@ def api_deployment_status():
         "ntfy_configured":bool(NTFY_TOPIC),
     }
 
-app.mount("/static",StaticFiles(directory=BASE/"static"),name="static")
+app.mount("/static",StaticFiles(directory=APP_DIR/"static"),name="static")
 
 @app.get("/")
-def home(): return FileResponse(BASE/"static"/"index.html")
+def home(): return FileResponse(APP_DIR/"static"/"index.html")
 
 def hdr():
     if not TOKEN or TOKEN=="PASTE_YOUR_NEW_TOKEN_HERE":
@@ -1454,11 +1461,11 @@ async def get_24h_chunked(sn):
 
 @app.get("/trends")
 def trends_page():
-    return RedirectResponse(url="/static/trends.html", status_code=307)
+    return FileResponse(APP_DIR/"static"/"trends.html")
 
 @app.get("/events")
 def events_page():
-    return RedirectResponse(url="/static/events.html", status_code=307)
+    return FileResponse(APP_DIR/"static"/"events.html")
 
 
 @app.get("/api/dashboard-history")
@@ -1563,11 +1570,11 @@ async def v501_status():
 
 @app.get("/settings")
 def settings_page():
-    return RedirectResponse(url="/static/settings.html", status_code=307)
+    return FileResponse(APP_DIR/"static"/"settings.html")
 
 @app.get("/audit")
 def audit_page():
-    return RedirectResponse(url="/static/audit.html", status_code=307)
+    return FileResponse(APP_DIR/"static"/"audit.html")
 
 @app.get("/api/admin/status")
 def admin_status(request: Request):

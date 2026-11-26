@@ -1,5 +1,5 @@
 $TaskName = "PBF Temperature Dashboard"
-$Base = Split-Path -Parent $MyInvocation.MyCommand.Path
+$Base = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)   # project root
 $LogDir = Join-Path $Base "logs"
 if (!(Test-Path $LogDir)) {
     New-Item -ItemType Directory -Path $LogDir | Out-Null

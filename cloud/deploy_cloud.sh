@@ -7,13 +7,13 @@ if ! command -v docker >/dev/null 2>&1; then
   exit 1
 fi
 
-if [ ! -f .env ]; then
-  echo "ERROR: .env is missing. Create it from .env.example before deploying."
+if [ ! -f ../.env ]; then
+  echo "ERROR: .env is missing. Create it in the project root from .env.cloud.example before deploying."
   exit 1
 fi
 
-chmod 600 .env
-mkdir -p data
+chmod 600 ../.env
+mkdir -p ../data
 
 echo "Building PBF Temperature Dashboard v6.0.3 Cloud Edition..."
 docker compose build --pull

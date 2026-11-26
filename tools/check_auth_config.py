@@ -1,7 +1,7 @@
 from pathlib import Path
 from dotenv import dotenv_values
 
-ENV=Path(__file__).parent/".env"
+ENV=Path(__file__).resolve().parent.parent/".env"  # project root
 if not ENV.exists():
     print("ERROR: .env not found")
     raise SystemExit(1)

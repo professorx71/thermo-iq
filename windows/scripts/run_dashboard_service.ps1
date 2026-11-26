@@ -1,5 +1,5 @@
 $ErrorActionPreference = "Stop"
-$Base = Split-Path -Parent $MyInvocation.MyCommand.Path
+$Base = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)   # project root
 Set-Location $Base
 
 $LogDir = Join-Path $Base "logs"
@@ -23,5 +23,5 @@ Add-Content $LogFile "==========================================================
 Add-Content $LogFile "$(Get-Date -Format s) Starting PBF Dashboard v6.0.0"
 Add-Content $LogFile "============================================================"
 
-& $Python -m uvicorn server:app --host 0.0.0.0 --port 8000 *>> $LogFile
+& $Python -m uvicorn server:app --app-dir app --host 0.0.0.0 --port 8000 *>> $LogFile
 exit $LASTEXITCODE

@@ -18,7 +18,7 @@ PHONE SETUP
 4. Add these lines to your existing private .env:
    NTFY_BASE_URL=https://ntfy.sh
    NTFY_TOPIC=your-long-random-private-topic
-5. Save .env and restart start_dashboard.bat.
+5. Save .env and restart windows/start_dashboard.bat.
 6. In the dashboard click TEST PHONE PUSH.
 7. Use PUSH STATUS if no notification arrives.
 

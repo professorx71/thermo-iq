@@ -14,7 +14,7 @@ if (-not (Test-Administrator)) {
     exit 10
 }
 
-$Base = Split-Path -Parent $MyInvocation.MyCommand.Path
+$Base = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)   # project root
 Set-Location $Base
 
 Write-Host ""
@@ -25,7 +25,7 @@ Write-Host "============================================================" -Foreg
 if (!(Test-Path ".env")) {
     Write-Host ""
     Write-Host "ERROR: .env is missing." -ForegroundColor Red
-    Write-Host "Copy the working private .env file from your current dashboard into this folder."
+    Write-Host "Copy the working private .env file into the project root folder."
     Read-Host "Press Enter"
     exit 11
 }
@@ -83,7 +83,7 @@ powercfg /change hibernate-timeout-ac 0 | Out-Null
 
 Write-Host "[5/7] Creating dashboard startup task..." -ForegroundColor Green
 $DashboardTask = "PBF Temperature Dashboard"
-$Runner = Join-Path $Base "run_dashboard_service.ps1"
+$Runner = Join-Path $PSScriptRoot "run_dashboard_service.ps1"
 
 $Action = New-ScheduledTaskAction `
     -Execute "powershell.exe" `
@@ -115,7 +115,7 @@ Register-ScheduledTask `
 
 Write-Host "[6/7] Creating 5-minute watchdog..." -ForegroundColor Green
 $WatchTask = "PBF Dashboard Watchdog"
-$WatchScript = Join-Path $Base "watchdog.ps1"
+$WatchScript = Join-Path $PSScriptRoot "watchdog.ps1"
 
 $WatchAction = New-ScheduledTaskAction `
     -Execute "powershell.exe" `
