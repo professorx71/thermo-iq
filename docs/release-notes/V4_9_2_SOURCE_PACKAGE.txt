@@ -1,5 +1,4 @@
 PBF LI-COR Temperature Monitoring Dashboard v4.9.2
-Designed by Daniel Salazar
 
 COMPLETE SOURCE CODE PACKAGE
 

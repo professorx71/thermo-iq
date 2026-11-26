@@ -1,5 +1,4 @@
 PBF LI-COR Temperature Monitoring Dashboard v5.0
-Designed by Daniel Salazar
 
 NEW IN v5.0
 - Logger Communication Status is populated for all six LI-COR loggers.
