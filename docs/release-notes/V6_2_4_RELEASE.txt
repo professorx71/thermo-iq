@@ -1,0 +1,4 @@
+ThermoIQ release v6.2.4
+Released 2026-11-26.
+
+- add sender email
