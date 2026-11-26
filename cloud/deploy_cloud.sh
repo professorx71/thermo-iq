@@ -15,7 +15,7 @@ fi
 chmod 600 ../.env
 mkdir -p ../data
 
-$16.2.1 Cloud Edition..."
+echo "Building PBF Temperature Dashboard v6.2.2 Cloud Edition..."
 docker compose build --pull
 
 echo "Starting dashboard on VPS loopback only (127.0.0.1:8000)..."

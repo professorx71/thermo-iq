@@ -1,0 +1,4 @@
+ThermoIQ release v6.2.2
+Released 2026-11-25.
+
+- update the release tag workflow

@@ -86,20 +86,29 @@ cleanup() {
 }
 trap cleanup EXIT
 
+# A release folder for this version may already exist:
+#   - same package  -> reuse it (redeploy / rollback to a known release)
+#   - other package -> an earlier build of this version that was never kept
+#                      live (deploy skipped or rolled back). Move it aside and
+#                      install the new build. Never touch the LIVE release.
 if [[ -d "$release_dir" ]]; then
-  if [[ ! -f "$release_dir/cloud/docker-compose.yml" ||
-        ! -L "$release_dir/.env" ||
-        ! -L "$release_dir/data" ||
-        ! -f "$release_dir/.release-sha256" ]]; then
-    echo "ERROR: existing release directory is incomplete: $release_dir" >&2
-    exit 1
+  stored_hash=$(cat "$release_dir/.release-sha256" 2>/dev/null || true)
+  if [[ "$stored_hash" == "$expected_hash" &&
+        -f "$release_dir/cloud/docker-compose.yml" &&
+        -L "$release_dir/.env" && -L "$release_dir/data" ]]; then
+    echo "Reusing installed release $tag (same package)."
+  else
+    live_dir=$(readlink -f "$root/current" 2>/dev/null || true)
+    if [[ -n "$live_dir" && "$live_dir" == "$(readlink -f "$release_dir")" ]]; then
+      echo "ERROR: $tag is live with a different package; release a new version instead." >&2
+      exit 1
+    fi
+    replaced="$root/releases/.replaced-${tag}-$(date +%Y%m%d%H%M%S)-$$"
+    echo "Replacing an earlier, non-live build of $tag (kept at $replaced)."
+    mv -- "$release_dir" "$replaced"
   fi
-  stored_hash=$(<"$release_dir/.release-sha256")
-  if [[ "$stored_hash" != "$expected_hash" ]]; then
-    echo "ERROR: existing release does not match the uploaded package checksum." >&2
-    exit 1
-  fi
-else
+fi
+if [[ ! -d "$release_dir" ]]; then
   mkdir "$incoming"
   tar -xzf "$archive" -C "$incoming"
   payload="$incoming/thermoiq-$tag"

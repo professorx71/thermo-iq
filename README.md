@@ -1,6 +1,6 @@
 # PBF Rise Baking Burnaby: Temperature Monitoring Dashboard
 
-$16.2.1 (Cloud Edition)**
+**Current version: v6.2.2 (Cloud Edition)**
 
 A web dashboard that monitors the plant's coolers and proofers through **LI-COR HOBO loggers**. It reads live temperature and humidity from **LI-COR Cloud** and raises alarms when a reading goes past its limit. Alarms are sent by email (Gmail) and phone push (ntfy). The dashboard also shows trends, exports CSV and PDF reports, and keeps an audit trail with calibration and deviation records.
 
@@ -341,18 +341,29 @@ Earlier versions kept every file in one folder. Your `.env`, `data/`, `logs/` an
 
 ### How a release is deployed
 
-`release.cmd` runs on your Windows PC. It runs `release.ps1`, which copies `cloud/deploy_release.sh` to the VPS and runs it there.
+`release.cmd` runs on your Windows PC. It runs `release.ps1`, which copies `cloud/deploy_release.sh` to the VPS and runs it there. You don't need to commit first; the script does it.
 
 ```powershell
-.\release.cmd -DryRun                                   # check everything, change nothing
-.\release.cmd -Version 6.2.1 -Notes "What changed"      # bump, commit, tag, package, then asks to DEPLOY
-.\release.cmd -DeployOnly -Version 6.2.1                # (re)deploy an existing tag, no new commit
+.\release.cmd -DryRun                                   # show what would be committed and deployed; change nothing
+.\release.cmd -Notes "What changed"                     # commit + push everything, deploy, tag if healthy
+.\release.cmd -Version 6.3.0 -Notes "Quarterly release" # same, with a chosen version number
+.\release.cmd -DeployOnly                               # deploy the current commit (tagged if healthy)
+.\release.cmd -DeployOnly -Version 6.2.1                # redeploy / roll back to an existing tag
 ```
 
-- The working tree must be clean: commit your changes first.
-- It asks you to type `CREATE` before it changes version files, commits and tags, and `DEPLOY` before it uploads anything.
-- It does **not** push to GitHub. Afterwards, push with `git push origin HEAD refs/tags/vX.Y.Z`.
-- The package is saved as `Downloads\thermoiq-vX.Y.Z.tar.gz`, and its SHA-256 is checked on the server.
+**What happens, step by step:**
+
+| Step | Prompt | What it does |
+|---|---|---|
+| 1. Plan | none | Shows the version, and every changed file that will be committed. Stops if any of them is private (`.env`, `data/`, `logs/`, `.venv/`, databases). |
+| 2. Commit and push | type `CREATE` | Updates the version in all files, writes `docs/release-notes/VX_Y_Z_RELEASE.txt`, runs **`git add -A`**, commits `Release vX.Y.Z`, and **pushes the branch to GitHub** |
+| 3. Deploy | type `DEPLOY` | Packages that commit (`Downloads\thermoiq-vX.Y.Z.tar.gz`), uploads it, checks its SHA-256 on the server and switches over, with automatic rollback |
+| 4. Tag and Release | none | **Only if the deploy is healthy**: creates tag `vX.Y.Z` on the deployed commit and pushes it. The workflow in [.github/workflows/release.yml](.github/workflows/release.yml) then creates the **GitHub Release**, with the notes plus the `.tar.gz` and `.sha256` |
+
+- **Version numbers:** the patch number goes up (6.2.1 → 6.2.2) only when the current version has been released, meaning it has a tag. If a deploy was skipped or failed, the next run **reuses** the same version and adds to its release notes, so no numbers are skipped.
+- **A deploy you skip or that fails** leaves your work committed and pushed, but with **no tag and no GitHub Release**. Deploy it later with `.\release.cmd -DeployOnly`.
+- **Check `git status` before running.** `git add -A` includes every file that `.gitignore` doesn't exclude.
+- **Publishing a tag that's already on GitHub** (or one pushed before the workflow existed): GitHub → **Actions** → **GitHub Release** → **Run workflow** → enter the tag, e.g. `v6.2.1`.
 
 **What the server looks like after a release:**
 
@@ -713,6 +724,7 @@ Version-specific fixes are documented in [docs/release-notes/](docs/release-note
 | v5.3 | Admin password changes, cache fix, weekday/24 h scheduler, calibration and roles, plant logger |
 | v6.0 | Cloud edition (Docker/Caddy), username/password rules, auth fixes |
 | v6.1 | Maintenance downtime report, 7-day trend download, calendar history export |
+| **v6.2.2** | update the release tag workflow |
 | **v6.2.1** | fixed lock and add release |
 | **v6.2.0** | **Audit controls:** calibration records, deviations, expanded audit trail, retention, daily backups |
 | *(unreleased)* | Project reorganized into `app/`, `tools/`, `windows/`, `cloud/` and `docs/`. No change to application behaviour. |

@@ -1,0 +1,94 @@
+# Creates a GitHub Release for every pushed version tag (vX.Y.Z).
+#
+# Normal flow: release.cmd -> type PUSH -> the tag is pushed -> this runs.
+# For a tag that already exists on GitHub (or was pushed before this file
+# existed): Actions tab -> "GitHub Release" -> Run workflow -> enter the tag.
+name: GitHub Release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing release tag, e.g. v6.2.1"
+        required: true
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.event.inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository (with tags)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Resolve and validate tag
+        id: tag
+        env:
+          # Passed via env, never interpolated into the script (prevents injection).
+          INPUT_TAG: ${{ github.event.inputs.tag }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          TAG="${INPUT_TAG:-$REF_NAME}"
+          if [[ ! "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::'$TAG' is not a release tag like v6.2.1"; exit 1
+          fi
+          if ! git rev-parse -q --verify "refs/tags/$TAG" >/dev/null; then
+            echo "::error::Tag $TAG does not exist on GitHub. Push it first: git push origin refs/tags/$TAG"; exit 1
+          fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Build release package from the tag
+        env:
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          git archive --format=tar.gz --prefix="thermoiq-$TAG/" -o "thermoiq-$TAG.tar.gz" "$TAG"
+          sha256sum "thermoiq-$TAG.tar.gz" > "thermoiq-$TAG.tar.gz.sha256"
+          cat "thermoiq-$TAG.tar.gz.sha256"
+
+      - name: Prepare release notes
+        env:
+          TAG: ${{ steps.tag.outputs.tag }}
+          VERSION: ${{ steps.tag.outputs.version }}
+        run: |
+          notes_path="docs/release-notes/V${VERSION//./_}_RELEASE.txt"
+          {
+            if git cat-file -e "$TAG:$notes_path" 2>/dev/null; then
+              git show "$TAG:$notes_path"
+            else
+              echo "ThermoIQ release $TAG"
+            fi
+            echo
+            echo "---"
+            echo "**Package:** \`thermoiq-$TAG.tar.gz\` (built by GitHub from tag \`$TAG\`)."
+            echo "Deploy to the VPS with \`release.cmd -DeployOnly -Version $VERSION\`; see the README section \"Releasing and rolling back\"."
+          } > release-notes.md
+          cat release-notes.md
+
+      - name: Create or update the GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          files=("thermoiq-$TAG.tar.gz" "thermoiq-$TAG.tar.gz.sha256")
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release $TAG exists; updating notes and assets."
+            gh release edit "$TAG" --notes-file release-notes.md
+            gh release upload "$TAG" "${files[@]}" --clobber
+          else
+            gh release create "$TAG" "${files[@]}" \
+              --title "ThermoIQ $TAG" \
+              --notes-file release-notes.md \
+              --verify-tag \
+              --latest
+          fi
