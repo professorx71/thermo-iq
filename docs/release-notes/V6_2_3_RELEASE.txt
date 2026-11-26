@@ -1,0 +1,4 @@
+ThermoIQ release v6.2.3
+Released 2026-11-26.
+
+- setting and alarm scheduler

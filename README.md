@@ -1,8 +1,10 @@
-# PBF Rise Baking Burnaby: Temperature Monitoring Dashboard
+<img src="app/static/thermoiq-logo.svg" alt="ThermoIQ" width="320">
 
-**Current version: v6.2.2 (Cloud Edition)**
+# ThermoIQ: PBF Rise Baking Burnaby Temperature Monitoring
 
-A web dashboard that monitors the plant's coolers and proofers through **LI-COR HOBO loggers**. It reads live temperature and humidity from **LI-COR Cloud** and raises alarms when a reading goes past its limit. Alarms are sent by email (Gmail) and phone push (ntfy). The dashboard also shows trends, exports CSV and PDF reports, and keeps an audit trail with calibration and deviation records.
+**Current version: v6.2.3 (Cloud Edition)**
+
+A web dashboard that monitors the plant's coolers and proofers through **LI-COR HOBO loggers**. It reads live temperature and humidity from **LI-COR Cloud** and raises alarms when a reading goes past its limit. Alarms are sent by email and text message, to recipients managed on the Settings page. The dashboard also shows trends, exports CSV and PDF reports, and keeps an audit trail with calibration and deviation records.
 
 > **Important:** This dashboard supports monitoring. It is **not** a validated plant alarm system. Acknowledging an alarm here does **not** acknowledge it in LI-COR Cloud.
 
@@ -75,7 +77,8 @@ thermoiq/
 │       ├── audit.html + audit.js       Calibration, deviations, audit trail
 │       ├── app.js                      Older shared dashboard script
 │       ├── style.css
-│       └── rise-logo.png
+│       ├── thermoiq-logo.svg           Logo (snowflake + wordmark)
+│       └── thermoiq-mark.svg           Snowflake icon (page header, favicon)
 │
 ├── tools/                       ── ADMIN COMMAND-LINE TOOLS ──
 │   ├── set_admin_password.py    Writes ADMIN_USERNAME / ADMIN_PASSWORD_HASH to .env
@@ -115,7 +118,7 @@ thermoiq/
 │   │   ├── MINIPC_SETUP.txt     Mini-PC hardware, BIOS, network, install
 │   │   ├── CLOUD_DEPLOYMENT.txt OVH VPS deployment and go-live
 │   │   ├── LAN_SETUP.txt        Reaching the dashboard from other PCs/phones
-│   │   └── PHONE_PUSH_SETUP.txt ntfy phone notifications
+│   │   └── TEXT_MESSAGE_SETUP.txt Text message (SMS) alarm alerts
 │   └── release-notes/           One file per version (V3 … V6.2.0)
 │
 ├── data/                        RUNTIME: alarm state, audit trail, backups (git-ignored)
@@ -143,8 +146,8 @@ thermoiq/
 | PDF reports | **reportlab**: PDF generation and encryption |
 | TLS on corporate networks | **truststore**: uses the Windows certificate store |
 | Time zones | **tzdata** / `zoneinfo` (plant time zone: `America/Vancouver`) |
-| Email | Python `smtplib` → Gmail SMTP (SSL, port 465) |
-| Phone push | **ntfy.sh** (plain HTTP POST) |
+| Email | Python `smtplib` → Gmail SMTP (SSL, port 465) by default; any SMTP server via `SMTP_HOST`/`SMTP_PORT` |
+| Text messages | Same SMTP account, sent to each phone's **carrier email-to-text address** (e.g. `6045551234@txt.bell.ca`) |
 | Auth | PBKDF2-SHA256 password hashes (`hashlib`), in-memory sessions, HTTP-only cookie |
 | Database | **None.** All state is kept in JSON files under `data/` |
 | Frontend | Plain **HTML + CSS + JavaScript**: no framework, no build step, charts drawn on `<canvas>` |
@@ -171,8 +174,8 @@ thermoiq/
  └──────┬───────────┬──────────┬────────────┘
         │           │          │
         ▼           ▼          ▼
-   data/*.json   Gmail SMTP   ntfy.sh push
-   (state,       (email)      (phone)
+   data/*.json   SMTP (email + carrier email-to-text)
+   (state,       → inboxes and phones
     audit,
     backups)
         ▲
@@ -218,12 +221,12 @@ Create `.env` in the **project root** (next to `requirements.txt`) by copying `.
 |---|---|---|---|
 | `LICOR_API_TOKEN` | **Yes** | none | Private LI-COR Cloud API token |
 | `LICOR_API_BASE` | No | `https://api.licor.cloud` | LI-COR API base URL |
-| `GMAIL_SENDER` | For email | none | Gmail account that sends alerts |
-| `GMAIL_APP_PASSWORD` | For email | none | Google **App Password** (spaces are removed automatically) |
-| `ALERT_EMAIL` | For email | none | Address that receives alerts |
-| `NTFY_BASE_URL` | No | `https://ntfy.sh` | ntfy server |
-| `NTFY_TOPIC` | For push | none | Long, random, private topic name |
-| `NOTIFICATIONS_ENABLED` | No | `false` | `true` sends automatic alarm emails and pushes |
+| `GMAIL_SENDER` | For email/texts | none | **Sender** account that sends alarm emails and texts. Change this (and the password) to change the sender |
+| `GMAIL_APP_PASSWORD` | For email/texts | none | Google **App Password**, or the sender account's SMTP password (spaces are removed automatically) |
+| `SMTP_HOST` | No | `smtp.gmail.com` | Mail server, for a non-Gmail sender |
+| `SMTP_PORT` | No | `465` | `465` = SSL; any other port uses STARTTLS (e.g. `587`) |
+| `ALERT_EMAIL` | No | none | Starting email recipient(s), comma-separated. Used only until recipients are saved on the Settings page |
+| `NOTIFICATIONS_ENABLED` | No | `false` | `true` sends automatic alarm emails and texts |
 | `DEPLOYMENT_ROLE` | No | `CLOUD-TEST` | Label shown in the UI, e.g. `CLOUD-PRIMARY` or `CLOUD-TEST` |
 | `ADMIN_USERNAME` | No | `admin` | Admin login name |
 | `ADMIN_PASSWORD_HASH` | **Yes** (for Settings) | none | Generate with `windows/SET_ADMIN_PASSWORD.bat` |
@@ -297,7 +300,7 @@ ssh -L 8000:127.0.0.1:8000 ubuntu@YOUR_VPS_IP
 Caddy obtains and renews certificates automatically. Every page is protected by Caddy basic auth, and the Settings page still requires its own Admin/Operator login.
 
 **Go-live checklist:**
-1. Turn off automatic Gmail/ntfy alarms on the mini-PC backup.
+1. Turn off automatic email/text alarms on the mini-PC backup.
 2. In the cloud `.env`, set `NOTIFICATIONS_ENABLED=true` and `DEPLOYMENT_ROLE=CLOUD-PRIMARY`.
 3. Run `cd cloud && docker compose restart dashboard`.
 
@@ -496,12 +499,12 @@ For each logger, on every 60-second cycle:
 3. **Alarm condition:** HIGH loggers alarm when temp > limit; LOW loggers alarm when temp < limit. `monitor` loggers never alarm.
 4. **Suppression:** no alarm is raised when:
    - monitoring is turned off for the logger (`NOT IN USE`), or
-   - the weekday/24-hour **schedule** says monitoring is inactive (`OUTSIDE ALARM SCHEDULE`)
+   - the weekly **schedule** says alarms are OFF right now (`OUTSIDE ALARM SCHEDULE`)
 5. **State machine and events** (written to the event log and audit trail):
-   - `HIGH/LOW TEMPERATURE ALARM`: sends one alarm email and push
+   - `HIGH/LOW TEMPERATURE ALARM`: sends one alarm email and text message
    - `5-MIN REMINDER`: repeats every 5 minutes while the alarm stays active
    - `ALARM NOTIFICATION SUSPENDED`: monitoring was suspended while an alarm was active
-   - `RETURN TO NORMAL`: sends one recovery email and push, including the alarm duration
+   - `RETURN TO NORMAL`: sends one recovery email and text, including the alarm duration
 6. **Acknowledge:** a flashing **red** banner turns steady **orange** ("ACKNOWLEDGED — CONDITION STILL ACTIVE"). The banner clears by itself when the reading is back within the limit. A new alarm always starts unacknowledged.
 
 ---
@@ -510,10 +513,30 @@ For each logger, on every 60-second cycle:
 
 | Channel | Setup | Test |
 |---|---|---|
-| **Email** | Gmail account with 2-step verification, plus an **App Password** in `.env` | Dashboard "Test Email" button or `POST /api/test-email` |
-| **Phone push** | Install the **ntfy** app and subscribe to the same `NTFY_TOPIC` ([guide](docs/guides/PHONE_PUSH_SETUP.txt)) | `POST /api/test-push` |
+| **Email** | Settings → **Alarm Notifications** → **Email recipients** (one per line) | **Send Test Email** |
+| **Text message** | Settings → **Alarm Notifications** → **Text Message Alerts**: enter the mobile number, pick the carrier, **Add**, **Save** ([guide](docs/guides/TEXT_MESSAGE_SETUP.txt)) | **Send Test Text** |
+
+Recipients are managed by the **Admin** on the Settings page and saved in `data/notification_config.json` (included in backups). Every change is recorded in the audit trail. Each recipient gets their own message, so nobody sees the other addresses or phone numbers.
+
+**The sender** (the account messages come *from*) needs a password, so it stays in `.env`: set `GMAIL_SENDER` and `GMAIL_APP_PASSWORD` (plus `SMTP_HOST`/`SMTP_PORT` for a non-Gmail account), then restart. The **sender name** shown in the "From" field is set on the Settings page.
+
+**Text messages** go through the carrier's email-to-text gateway, are kept under 150 plain characters, and can be delayed or filtered by the carrier. Always confirm each phone with **Send Test Text**, and keep at least one email recipient.
 
 Automatic alarms are sent **only** when `NOTIFICATIONS_ENABLED=true`.
+
+### Alarm notification schedule
+
+Each logger card on the Settings page has an **Alarm Notification Scheduler** (Admin and Operator):
+
+| Setting | Meaning |
+|---|---|
+| **Weekly scheduler** OFF | Alarms follow RUNNING / NOT IN USE only |
+| **Weekly scheduler** ON | Alarms are sent only inside each day's window |
+| **Alarms** ON/OFF (per day) | OFF = no alarm notifications that day |
+| **24 h** | Alarms all day |
+| **Alarm ON / Alarm OFF** (per day) | That day's window, Pacific Time. An OFF time earlier than the ON time runs overnight: Mon ON 22:00 · OFF 06:00 covers Monday 22:00 to Tuesday 06:00 |
+
+Buttons: **Copy Mon → Tue–Fri**, **Copy Mon → every day**, **Preset: Mon–Fri 24 h**, and **Apply this schedule to ALL loggers**. Readings are still displayed and logged while alarms are scheduled OFF. Schedules saved by v6.2.x are converted automatically.
 
 **Daily maintenance/downtime report:** configured in Settings (Admin). It is emailed automatically once a day and can also be sent on demand.
 
@@ -525,7 +548,8 @@ There is no database. All state is kept in JSON files in `data/`, in the project
 
 | File | Contents |
 |---|---|
-| `alarm_config.json` | Per-logger limits, names, monitoring flag, schedules |
+| `alarm_config.json` | Per-logger limits, names, monitoring flag, weekly schedules |
+| `notification_config.json` | Email and text-message recipients, sender name |
 | `alarm_state.json` | Current alarm and acknowledgement state |
 | `alarm_events.json` | Alarm event log |
 | `downtime_history.json`, `downtime_active.json` | Maintenance downtime records |
@@ -599,7 +623,7 @@ The same steps copy one instance's settings to another, for example cloud → lo
 | `/` | Live dashboard: logger cards, alarm banner, °C/°F toggle, full-screen/TV mode, auto-refresh every 60 s | `index.html`, `dashboard.js` |
 | `/trends` | Temperature and %RH trends (1 h / 24 h / 7 days) with limit lines; CSV downloads | `trends.html`, `trends.js` |
 | `/events` | Alarm event log | `events.html`, `events.js` |
-| `/settings` | Admin/Operator login, limits, schedules, accounts, reports | `settings.html`, `settings.js` |
+| `/settings` | Admin/Operator login, limits, per-day alarm schedules, email/text recipients, accounts, reports | `settings.html`, `settings.js` |
 | `/audit` | Calibration, alarm episodes, deviations, audit trail, PDF/CSV audit report, backups | `audit.html`, `audit.js` |
 
 All of these files are in `app/static/`. After an update, press **Ctrl+F5** if the browser still shows the old page. Static files are versioned with `?v=6.2.0`.
@@ -618,8 +642,7 @@ All endpoints are in [app/server.py](app/server.py). Endpoints marked 🔒 need 
 | GET | `/api/history/{sn}` | Trend data for one logger |
 | GET | `/api/deployment-status` | Version, deployment role, notification flag |
 | GET | `/api/v501-status` | Extended system status |
-| GET | `/api/email-status` | Whether Gmail is configured |
-| GET | `/api/push-status` | Whether ntfy is configured |
+| GET | `/api/email-status` | Whether email and texts are configured (recipient counts only) |
 
 ### Alarms
 | Method | Path | Description |
@@ -629,7 +652,6 @@ All endpoints are in [app/server.py](app/server.py). Endpoints marked 🔒 need 
 | POST | `/api/ack/{sn}` | Acknowledge the alarm on a logger |
 | POST | `/api/test-email` | Send a test email |
 | POST | `/api/test-alarm-email` | Send a sample alarm email |
-| POST | `/api/test-push` | Send a test ntfy push |
 
 ### Downloads and reports
 | Method | Path | Description |
@@ -656,8 +678,11 @@ All endpoints are in [app/server.py](app/server.py). Endpoints marked 🔒 need 
 | Method | Path | Description |
 |---|---|---|
 | GET | `/api/admin/config` | Current per-logger configuration |
-| POST | `/api/admin/config/{sn}` | Update one logger (limit, name, monitoring, schedule) |
-| POST | `/api/admin/schedule/all` | Apply one schedule to all loggers (Operator allowed) |
+| POST | `/api/admin/config/{sn}` | Update one logger (limit, monitoring, calibration, `schedule_week`) |
+| POST | `/api/admin/schedule/all` | Apply one weekly schedule to all loggers (Operator allowed) |
+| POST | `/api/admin/notifications` | Save email/text recipients and sender name (Admin) |
+| POST | `/api/admin/notifications/test-email` | Send a test email to all email recipients (Admin) |
+| POST | `/api/admin/notifications/test-text` | Send a test text to all text recipients (Admin) |
 | POST | `/api/admin/report-config` | Daily maintenance report settings |
 | POST | `/api/admin/send-maintenance-report` | Send the report now |
 
@@ -690,8 +715,8 @@ FastAPI's interactive API docs are also at **`/docs`** while the app is running.
 | All loggers `OFFLINE` | Check `LICOR_API_TOKEN`, that the internet connection works, and that LI-COR Cloud is up |
 | SSL/certificate errors on the corporate network | Make sure `truststore` is installed; it uses the Windows certificate store |
 | Old page after an update | Press **Ctrl+F5** |
-| No emails | Check `/api/email-status`; Gmail needs an **App Password**, not your normal password; check `NOTIFICATIONS_ENABLED` |
-| No phone pushes | Make sure the ntfy app is subscribed to the exact `NTFY_TOPIC` |
+| No emails | Click **Send Test Email** in Settings; Gmail needs an **App Password**, not your normal password; check `NOTIFICATIONS_ENABLED` |
+| No text messages | Click **Send Test Text**; check the carrier domain in [the guide](docs/guides/TEXT_MESSAGE_SETUP.txt). Some carriers delay or block gateway texts |
 | Duplicate alarms | Both the cloud and the mini-PC have `NOTIFICATIONS_ENABLED=true`. Turn it off on one of them |
 | Cannot log in to Settings | Run `python tools/check_auth_config.py`; reset with `windows\SET_ADMIN_PASSWORD.bat` |
 | Other LAN devices can't connect | Run `windows\enable_lan_firewall.bat` as admin; use the address from `windows\DASHBOARD_STATUS.bat` |
@@ -708,7 +733,7 @@ Version-specific fixes are documented in [docs/release-notes/](docs/release-note
 - The LI-COR token stays **on the server**. The browser never sees it.
 - `.env` and `cloud/Caddyfile` are listed in `.gitignore`. `.env` is excluded from backups and from the Docker build context (`.dockerignore`).
 - In the cloud, the app listens on **loopback only**. Public access goes through Caddy over HTTPS with basic auth, and Caddy adds `nosniff`, `SAMEORIGIN` and referrer-policy headers.
-- The ntfy topic works like a password. Use a long, random value that contains no names or phone numbers.
+- Email and text recipients (phone numbers) are visible to the Admin only, never to the Operator or the public status endpoints.
 - Admin and Operator actions, logins and logouts are all recorded in the audit trail.
 
 ---
@@ -724,6 +749,7 @@ Version-specific fixes are documented in [docs/release-notes/](docs/release-note
 | v5.3 | Admin password changes, cache fix, weekday/24 h scheduler, calibration and roles, plant logger |
 | v6.0 | Cloud edition (Docker/Caddy), username/password rules, auth fixes |
 | v6.1 | Maintenance downtime report, 7-day trend download, calendar history export |
+| **v6.2.3** | setting and alarm scheduler |
 | **v6.2.2** | update the release tag workflow |
 | **v6.2.1** | fixed lock and add release |
 | **v6.2.0** | **Audit controls:** calibration records, deviations, expanded audit trail, retention, daily backups |

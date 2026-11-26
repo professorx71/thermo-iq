@@ -1,0 +1,61 @@
+THERMOIQ - TEXT MESSAGE (SMS) ALARM ALERTS
+(Replaces the ntfy phone push used up to v6.2.x.)
+
+HOW IT WORKS
+Text messages are sent as a short email to each phone's carrier
+"email-to-text" address. The carrier turns the email into a text message.
+No app, account or SMS service is needed; the same sender account that sends
+alarm emails (GMAIL_SENDER in .env) sends the texts.
+
+  Alarm begins        -> email + text immediately
+  Alarm still active  -> email + text every 5 minutes
+  Alarm clears        -> email + text with the alarm duration
+  Automatic alarms are sent only when NOTIFICATIONS_ENABLED=true in .env.
+
+ADD A PHONE (Admin)
+1. Open Settings and log in as Admin.
+2. In "Alarm Notifications" > "Text Message Alerts", enter the 10-digit mobile
+   number, pick the carrier and click Add. Or type the full address yourself,
+   one per line, e.g. 6045551234@txt.bell.ca
+3. Click Save Notification Settings.
+4. Click Send Test Text and confirm every phone receives it.
+
+CARRIER ADDRESSES (number@domain)
+  Bell            txt.bell.ca
+  Rogers          pcs.rogers.com
+  Telus           msg.telus.com
+  Fido            fido.ca
+  Koodo           msg.koodomobile.com
+  Virgin Plus     vmobile.ca
+  Freedom Mobile  txt.freedommobile.ca
+  Public Mobile   msg.telus.com
+  Chatr           pcs.rogers.com
+  SaskTel         sms.sasktel.com
+  Verizon (US)    vtext.com
+  T-Mobile (US)   tmomail.net
+Carriers change or retire these gateways (AT&T shut its gateway down in 2025).
+If a test text does not arrive, ask the carrier for its current email-to-SMS
+address, or use the person's email address instead.
+
+LIMITS
+- Texts are kept to 150 plain characters, for example:
+    ALARM Tortilla L1 Cooler HIGH TEMP 15.2C (limit 13.0C) 14:05
+- Carriers may delay, filter or drop gateway messages, and some limit how many
+  messages per hour one sender can send. Do not rely on texts alone: keep
+  email recipients configured too.
+- Each phone gets its own message; recipients never see each other's numbers.
+
+CHANGING THE SENDER
+The sending account needs a password, so it stays in .env:
+  GMAIL_SENDER=alerts@yourdomain.com
+  GMAIL_APP_PASSWORD=app-password
+  # optional, for a non-Gmail account:
+  SMTP_HOST=smtp.your-provider.com
+  SMTP_PORT=587
+Restart the dashboard after changing .env. The display name ("From" name) is
+set on the Settings page.
+
+NOTE
+This dashboard is supplemental monitoring. Validate notification delivery and
+alarm procedures before relying on it for food-safety or personnel-safety
+functions.

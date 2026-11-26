@@ -120,26 +120,3 @@ function downloadAll24h(){
  lastData.devices.forEach((d,i)=>setTimeout(()=>download24h(d.logger_sn),i*450));
 }
 loadAlarmLog();load();setInterval(load,60000);setInterval(loadAlarmLog,30000);
-async function testPhonePush(ev){
-  if(ev) ev.preventDefault();
-  try{
-    const r=await fetch('/api/test-push',{method:'POST'});
-    const text=await r.text();
-    let d;
-    try { d=JSON.parse(text); }
-    catch { throw new Error('Server returned HTTP '+r.status+': '+text.slice(0,160)); }
-    if(d.ok) alert('Test phone push sent. Check your iPhone.');
-    else alert('Phone push error: '+(d.error||'Unknown error'));
-  }catch(e){ alert('Phone push test error: '+e.message); }
-}
-async function showPushStatus(ev){
-  if(ev) ev.preventDefault();
-  try{
-    const r=await fetch('/api/push-status');
-    const d=await r.json();
-    alert('Phone Push: '+(d.configured?'CONFIGURED':'NOT CONFIGURED')+
-          '\nService: ntfy'+
-          '\nLast success: '+(d.last_success||'None')+
-          '\nLast error: '+(d.last_error||'None'));
-  }catch(e){ alert('Push status error: '+e); }
-}

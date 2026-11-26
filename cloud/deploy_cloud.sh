@@ -15,7 +15,7 @@ fi
 chmod 600 ../.env
 mkdir -p ../data
 
-echo "Building PBF Temperature Dashboard v6.2.2 Cloud Edition..."
+echo "Building PBF Temperature Dashboard v6.2.3 Cloud Edition..."
 docker compose build --pull
 
 echo "Starting dashboard on VPS loopback only (127.0.0.1:8000)..."
@@ -30,4 +30,4 @@ printf '%s\n' "Secure test mode is running." \
   "Use an SSH tunnel from Windows:" \
   "  ssh -L 8000:127.0.0.1:8000 ubuntu@YOUR_VPS_IP" \
   "Then browse: http://localhost:8000" \
-  "Automatic Gmail/ntfy alarms remain controlled by NOTIFICATIONS_ENABLED in .env."
+  "Automatic email/text alarms remain controlled by NOTIFICATIONS_ENABLED in .env."

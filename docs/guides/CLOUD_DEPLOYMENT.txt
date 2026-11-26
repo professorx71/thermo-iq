@@ -1,8 +1,8 @@
 PBF Rise Baking Burnaby Temperature Dashboard
-v6.2.2 OVH Cloud Edition
+v6.2.3 OVH Cloud Edition
 
 ARCHITECTURE
-LI-COR Cloud -> OVH VPS -> PBF Dashboard -> Gmail/ntfy
+LI-COR Cloud -> OVH VPS -> PBF Dashboard -> email/text messages
 GMKtec mini-PC remains local backup.
 
 SAFETY DEFAULT
@@ -25,20 +25,22 @@ After the first install, use the repository-root release.cmd to create and deplo
 tagged updates to ubuntu@148.113.244.247. The default install root is
 /opt/pbf-temp-dashboard, matching the initial setup above.
 
-1. Commit the application changes and the release tooling; the worktree must be clean.
+1. Check `git status`: the release commits EVERY changed file (git add -A).
 2. Preview the version/files without changing anything:
      .\release.cmd -DryRun
 3. Create a patch release and deploy it:
      .\release.cmd -Notes "Improved audit exports"
    Or select a semver explicitly:
      .\release.cmd -Version 6.3.0 -Notes "Quarterly release"
-4. The script updates the application/UI cache versions, adds a release note,
-   commits and tags only those version files, then packages the tag. Type CREATE
-   and later DEPLOY at the prompts to authorize those steps.
-5. To deploy an existing local tag without creating a new version:
+4. Type CREATE: the script updates the version, writes a release note, commits
+   all changes and pushes the branch to GitHub. Type DEPLOY: it packages that
+   commit and deploys it. Only if the deploy is healthy does it create and push
+   the vX.Y.Z tag, which makes GitHub create the Release.
+5. To deploy later (after skipping DEPLOY), or redeploy an existing tag:
+     .\release.cmd -DeployOnly
      .\release.cmd -DeployOnly -Version 6.2.1
 
-The script does not push to GitHub. It refuses to release a dirty worktree or a
+The script refuses to commit .env/runtime data, or to release a
 tag containing .env/runtime data. The server must have Docker Compose, SSH access,
 and its configured /opt/pbf-temp-dashboard/.env. Releases use versioned folders;
 the existing .env and data/ remain at the install root. The prior release is
@@ -54,7 +56,7 @@ After IT/DNS gives you a domain/subdomain pointing to the VPS:
 
 GO-LIVE
 Only after cloud tests pass:
-- Disable automatic Gmail/ntfy alarms on the GMKtec backup.
+- Disable automatic email/text alarms on the GMKtec backup.
 - Change cloud .env to:
     NOTIFICATIONS_ENABLED=true
     DEPLOYMENT_ROLE=CLOUD-PRIMARY

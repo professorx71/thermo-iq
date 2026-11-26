@@ -8,7 +8,7 @@ This turns a Windows mini-PC into the dedicated 24/7 server for:
 - LI-COR Cloud temperature/humidity monitoring
 - PBF Rise Baking Burnaby dashboard
 - Gmail alarms/recovery messages
-- ntfy iPhone notifications
+- Text message alarm alerts (carrier email-to-text)
 - 5-minute active-alarm reminders
 - Persistent alarm/event history
 - LAN access from office PCs, tablets, and phones

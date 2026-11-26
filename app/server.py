@@ -13,6 +13,7 @@ import base64
 import re
 import zipfile
 from email.message import EmailMessage
+from email.utils import formataddr
 from zoneinfo import ZoneInfo
 from datetime import datetime,timedelta,timezone
 from pathlib import Path
@@ -44,7 +45,11 @@ TOKEN=os.getenv("LICOR_API_TOKEN","").strip()
 API=os.getenv("LICOR_API_BASE","https://api.licor.cloud").rstrip("/")
 GMAIL_SENDER=os.getenv("GMAIL_SENDER","").strip()
 GMAIL_APP_PASSWORD=os.getenv("GMAIL_APP_PASSWORD","").replace(" ","").strip()
-ALERT_EMAIL=os.getenv("ALERT_EMAIL","").strip()
+ALERT_EMAIL=os.getenv("ALERT_EMAIL","").strip()   # first-run default recipient(s); the Settings page overrides it
+# Outgoing mail server. Defaults suit Gmail; set SMTP_HOST/SMTP_PORT to send from another provider.
+SMTP_HOST=os.getenv("SMTP_HOST","smtp.gmail.com").strip() or "smtp.gmail.com"
+try: SMTP_PORT=int(os.getenv("SMTP_PORT","465").strip() or 465)
+except ValueError: SMTP_PORT=465
 NOTIFICATIONS_ENABLED=os.getenv("NOTIFICATIONS_ENABLED","false").strip().lower() in ("1","true","yes","on")
 DEPLOYMENT_ROLE=os.getenv("DEPLOYMENT_ROLE","CLOUD-TEST").strip().upper() or "CLOUD-TEST"
 email_alarm_state={}
@@ -59,6 +64,7 @@ CONFIG_FILE=DATA_DIR/"alarm_config.json"
 DOWNTIME_FILE=DATA_DIR/"downtime_history.json"
 DOWNTIME_ACTIVE_FILE=DATA_DIR/"downtime_active.json"
 REPORT_CONFIG_FILE=DATA_DIR/"maintenance_report_config.json"
+NOTIFY_CONFIG_FILE=DATA_DIR/"notification_config.json"
 REPORT_STATE_FILE=DATA_DIR/"maintenance_report_state.json"
 CALIBRATION_FILE=DATA_DIR/"calibration_records.json"
 AUDIT_FILE=DATA_DIR/"audit_trail.json"
@@ -214,6 +220,55 @@ def _valid_hhmm(value, default="00:00"):
     except Exception:
         return default
 
+def _week_from_legacy(days, start="00:00", end="00:00"):
+    """Build a 7-day schedule (Mon..Sun) from the pre-v6.3 single start/end + day list."""
+    on=set(_normalize_schedule_days(days))
+    start=_valid_hhmm(start,"00:00"); end=_valid_hhmm(end,"00:00")
+    return [{"on":d in on,"start":start,"end":end} for d in range(7)]
+
+def _normalize_schedule_week(value, fallback):
+    """Each day: {"on": bool, "start": "HH:MM", "end": "HH:MM"}. start == end means 24 hours."""
+    if not isinstance(value,list) or len(value)!=7:
+        return fallback
+    out=[]
+    for row in value:
+        row=row if isinstance(row,dict) else {}
+        out.append({"on":bool(row.get("on",False)),
+                    "start":_valid_hhmm(row.get("start"),"00:00"),
+                    "end":_valid_hhmm(row.get("end"),"00:00")})
+    return out
+
+def parse_schedule_week(value):
+    """Validate a schedule_week sent by the Settings page; raise 400 on bad input."""
+    if not isinstance(value,list) or len(value)!=7:
+        raise HTTPException(status_code=400,detail="Schedule must list all 7 days (Mon-Sun)")
+    out=[]
+    for i,row in enumerate(value):
+        if not isinstance(row,dict):
+            raise HTTPException(status_code=400,detail=f"Invalid schedule for {SCHEDULE_DAY_NAMES[i]}")
+        start=_valid_hhmm(row.get("start","00:00"),""); end=_valid_hhmm(row.get("end","00:00"),"")
+        if not start or not end:
+            raise HTTPException(status_code=400,detail=f"{SCHEDULE_DAY_NAMES[i]}: Alarm ON/OFF time must use HH:MM")
+        out.append({"on":bool(row.get("on",False)),"start":start,"end":end})
+    return out
+
+def schedule_from_payload(data, old):
+    """(enabled, week) from a Settings request. Accepts schedule_week, or the
+    pre-v6.3 schedule_days/start/end fields (applied to every selected day)."""
+    enabled=bool(data.get("schedule_enabled",old.get("schedule_enabled",False)))
+    if "schedule_week" in data:
+        week=parse_schedule_week(data["schedule_week"])
+    elif any(k in data for k in ("schedule_days","schedule_start","schedule_end")):
+        start=_valid_hhmm(data.get("schedule_start","00:00"),""); end=_valid_hhmm(data.get("schedule_end","00:00"),"")
+        if not start or not end:
+            raise HTTPException(status_code=400,detail="Schedule start/end must use HH:MM")
+        week=_week_from_legacy(data.get("schedule_days",[]),start,end)
+    else:
+        week=old.get("schedule_week") or _week_from_legacy([0,1,2,3,4,5,6])
+    if enabled and not any(day["on"] for day in week):
+        raise HTTPException(status_code=400,detail="Turn alarms ON for at least one day, or set the weekly scheduler OFF")
+    return enabled,week
+
 def _normalize_schedule_days(value):
     if not isinstance(value,list):
         return [0,1,2,3,4,5,6]
@@ -241,35 +296,55 @@ def schedule_is_active(cfg, when_utc=None):
     """
     if not bool(cfg.get("schedule_enabled",False)):
         return True
-    days=set(_normalize_schedule_days(cfg.get("schedule_days",[0,1,2,3,4,5,6])))
-    if not days:
-        return False
+    week=cfg.get("schedule_week") or _week_from_legacy(cfg.get("schedule_days",[0,1,2,3,4,5,6]),
+                                                        cfg.get("schedule_start","00:00"),cfg.get("schedule_end","00:00"))
     now=(when_utc or datetime.now(timezone.utc)).astimezone(PLANT_TZ)
     cur=now.hour*60+now.minute
-    start=_minutes_hhmm(cfg.get("schedule_start","00:00"))
-    end=_minutes_hhmm(cfg.get("schedule_end","00:00"))
     wd=now.weekday()
-    if start == end:
-        return wd in days
-    if start < end:
-        return wd in days and start <= cur < end
-    # Overnight schedule; early-morning hours belong to the previous start day.
-    if cur >= start:
-        return wd in days
-    if cur < end:
-        return ((wd-1) % 7) in days
+    today=week[wd]
+    if today["on"]:
+        start=_minutes_hhmm(today["start"]); end=_minutes_hhmm(today["end"])
+        if start == end:
+            return True
+        if start < end and start <= cur < end:
+            return True
+        if start > end and cur >= start:
+            return True
+    # An overnight window (ON 22:00, OFF 06:00) started yesterday continues until its OFF time.
+    yday=week[(wd-1) % 7]
+    if yday["on"]:
+        start=_minutes_hhmm(yday["start"]); end=_minutes_hhmm(yday["end"])
+        if start > end and cur < end:
+            return True
     return False
+
+def _day_schedule_text(day):
+    if not day["on"]:
+        return "OFF"
+    if day["start"] == day["end"]:
+        return "24 hours"
+    return f"{day['start']}-{day['end']}"
 
 def schedule_summary(cfg):
     if not bool(cfg.get("schedule_enabled",False)):
         return "Schedule OFF — manual mode"
-    days=_normalize_schedule_days(cfg.get("schedule_days",[]))
-    labels=",".join(SCHEDULE_DAY_NAMES[d] for d in days) if days else "No days"
-    start=_valid_hhmm(cfg.get("schedule_start","00:00"))
-    end=_valid_hhmm(cfg.get("schedule_end","00:00"))
-    if start == end:
-        return f"{labels} · 24 hours"
-    return f"{labels} · {start}-{end} Pacific"
+    week=cfg.get("schedule_week") or _week_from_legacy(cfg.get("schedule_days",[]),
+                                                        cfg.get("schedule_start","00:00"),cfg.get("schedule_end","00:00"))
+    # Group consecutive days with the same hours: "Mon-Fri 06:00-22:00 · Sat-Sun OFF"
+    groups=[]
+    for i,day in enumerate(week):
+        text=_day_schedule_text(day)
+        if groups and groups[-1][2]==text:
+            groups[-1][1]=i
+        else:
+            groups.append([i,i,text])
+    if len(groups)==1:
+        return "Every day OFF" if groups[0][2]=="OFF" else f"Every day {groups[0][2]} (Pacific)"
+    parts=[]
+    for a,b,text in groups:
+        days=SCHEDULE_DAY_NAMES[a] if a==b else f"{SCHEDULE_DAY_NAMES[a]}-{SCHEDULE_DAY_NAMES[b]}"
+        parts.append(f"{days} {text}")
+    return " · ".join(parts)+" (Pacific)"
 
 def get_runtime_cfg(sn):
     base_cfg=dict(LOGGERS[sn])
@@ -283,9 +358,9 @@ def get_runtime_cfg(sn):
         if "mode" in saved:
             base_cfg["mode"]=str(saved["mode"])
         base_cfg["schedule_enabled"]=bool(saved.get("schedule_enabled",False))
-        base_cfg["schedule_days"]=_normalize_schedule_days(saved.get("schedule_days",[0,1,2,3,4,5,6]))
-        base_cfg["schedule_start"]=_valid_hhmm(saved.get("schedule_start","00:00"),"00:00")
-        base_cfg["schedule_end"]=_valid_hhmm(saved.get("schedule_end","00:00"),"00:00")
+        legacy=_week_from_legacy(saved.get("schedule_days",[0,1,2,3,4,5,6]),
+                                 saved.get("schedule_start","00:00"),saved.get("schedule_end","00:00"))
+        base_cfg["schedule_week"]=_normalize_schedule_week(saved.get("schedule_week"),legacy)
         try: base_cfg["temperature_offset"]=float(saved.get("temperature_offset",0.0))
         except: base_cfg["temperature_offset"]=0.0
         try: base_cfg["humidity_offset"]=float(saved.get("humidity_offset",0.0))
@@ -297,9 +372,8 @@ def get_runtime_cfg(sn):
     base_cfg.setdefault("monitoring_enabled",True)
     base_cfg.setdefault("mode","RUNNING")
     base_cfg.setdefault("schedule_enabled",False)
-    base_cfg.setdefault("schedule_days",[0,1,2,3,4,5,6])
-    base_cfg.setdefault("schedule_start","00:00")
-    base_cfg.setdefault("schedule_end","00:00")
+    base_cfg.setdefault("schedule_week",_week_from_legacy([0,1,2,3,4,5,6]))
+    base_cfg["schedule_days"]=[i for i,day in enumerate(base_cfg["schedule_week"]) if day["on"]]
     base_cfg.setdefault("temperature_offset",0.0)
     base_cfg.setdefault("humidity_offset",0.0)
     sched_active=schedule_is_active(base_cfg)
@@ -315,7 +389,7 @@ def get_runtime_cfg(sn):
     return base_cfg
 
 def save_runtime_cfg(sn, *, limit=None, monitoring_enabled=None, mode=None,
-                     schedule_enabled=None, schedule_days=None, schedule_start=None, schedule_end=None,
+                     schedule_enabled=None, schedule_week=None,
                      temperature_offset=None, humidity_offset=None, updated_by="admin"):
     with event_lock:
         cfg=_read_json(CONFIG_FILE,{})
@@ -325,9 +399,14 @@ def save_runtime_cfg(sn, *, limit=None, monitoring_enabled=None, mode=None,
         if monitoring_enabled is not None: row["monitoring_enabled"]=bool(monitoring_enabled)
         if mode is not None: row["mode"]=str(mode)
         if schedule_enabled is not None: row["schedule_enabled"]=bool(schedule_enabled)
-        if schedule_days is not None: row["schedule_days"]=_normalize_schedule_days(schedule_days)
-        if schedule_start is not None: row["schedule_start"]=_valid_hhmm(schedule_start,"00:00")
-        if schedule_end is not None: row["schedule_end"]=_valid_hhmm(schedule_end,"00:00")
+        if schedule_week is not None:
+            row["schedule_week"]=schedule_week
+            # Legacy fields, kept so a rollback to v6.2.x still finds a sensible schedule.
+            on=[i for i,day in enumerate(schedule_week) if day["on"]]
+            first=schedule_week[on[0]] if on else {"start":"00:00","end":"00:00"}
+            row["schedule_days"]=on
+            row["schedule_start"]=first["start"]
+            row["schedule_end"]=first["end"]
         if temperature_offset is not None: row["temperature_offset"]=float(temperature_offset)
         if humidity_offset is not None: row["humidity_offset"]=float(humidity_offset)
         row["updated_at"]=datetime.now(timezone.utc).isoformat()
@@ -666,13 +745,13 @@ def create_audit_backup(reason="scheduled",actor="SYSTEM"):
     files=[
         EVENT_FILE,STATE_FILE,CONFIG_FILE,DOWNTIME_FILE,DOWNTIME_ACTIVE_FILE,
         REPORT_CONFIG_FILE,REPORT_STATE_FILE,CALIBRATION_FILE,AUDIT_FILE,
-        AUDIT_CONFIG_FILE,DEVIATION_FILE,
+        AUDIT_CONFIG_FILE,DEVIATION_FILE,NOTIFY_CONFIG_FILE,
     ]
     manifest={
         "created_utc":now.isoformat(),
         "created_pacific":now.astimezone(PLANT_TZ).isoformat(),
         "timezone":"America/Vancouver",
-        "version":"6.2.2",
+        "version":"6.2.3",
         "reason":reason,
         "actor":actor,
         "note":"Data/config backup only. Secrets in .env are intentionally excluded.",
@@ -778,7 +857,7 @@ async def build_audit_pdf(sn,date_text):
     deviations={str(r.get("episode_id")):r for r in load_deviations()}
 
     dataset={
-        "version":"6.2.2",
+        "version":"6.2.3",
         "date":selected.isoformat(),
         "timezone":"America/Vancouver",
         "logger_serials":serials,
@@ -1129,9 +1208,10 @@ def save_report_config(enabled,time_text,recipient,hours=24,updated_by="admin"):
     time_text=_valid_hhmm(time_text,"")
     if not time_text:
         raise HTTPException(status_code=400,detail="Daily report time must use HH:MM")
-    recipient=str(recipient or "").strip()
-    if not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+",recipient):
-        raise HTTPException(status_code=400,detail="Enter a valid report recipient email")
+    recipients=parse_address_list(recipient,"report recipient")
+    if not recipients:
+        raise HTTPException(status_code=400,detail="Enter at least one report recipient email")
+    recipient=", ".join(recipients)
     try:
         hours=max(1,min(168,int(hours)))
     except Exception:
@@ -1214,84 +1294,190 @@ def clear_ack(logger_sn):
     with event_lock:
         st=_read_json(STATE_FILE,{"acked":{}}); st.setdefault("acked",{}).pop(logger_sn,None); _write_json(STATE_FILE,st)
 
-# Free phone push notifications via ntfy.sh
-NTFY_BASE_URL = os.getenv("NTFY_BASE_URL", "https://ntfy.sh").rstrip("/")
-NTFY_TOPIC = os.getenv("NTFY_TOPIC", "").strip()
-push_status = {"configured": bool(NTFY_TOPIC), "last_success": None, "last_error": None, "last_title": None}
+# ---------------------------------------------------------------------------
+# Alarm notifications: email + text message (carrier email-to-text gateways)
+# Recipients are managed on the Settings page (data/notification_config.json).
+# The sending account (GMAIL_SENDER / GMAIL_APP_PASSWORD, optional SMTP_HOST /
+# SMTP_PORT) stays in .env because it needs a password.
+# ---------------------------------------------------------------------------
+notify_lock=threading.Lock()
+_ADDRESS_RE=re.compile(r"[^@\s,;<>\"']+@[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)+")
+MAX_RECIPIENTS=25
+SMS_MAX_CHARS=150
 
-def send_push(title: str, message: str, priority: str = "max", tags: str = "rotating_light"):
-    """Send a free push notification through ntfy. Topic should be long/random and kept private."""
-    if not NTFY_TOPIC:
-        raise RuntimeError("NTFY_TOPIC is not configured in .env")
-    import urllib.request
-    url = f"{NTFY_BASE_URL}/{NTFY_TOPIC}"
-    req = urllib.request.Request(
-        url,
-        data=message.encode("utf-8"),
-        method="POST",
-        headers={
-            "Title": title.encode("ascii", "ignore").decode("ascii") or "PBF Temperature Alert",
-            "Priority": priority,
-            "Tags": tags,
-        },
-    )
-    with urllib.request.urlopen(req, timeout=15) as r:
-        r.read()
-    push_status["last_success"] = datetime.now().isoformat(timespec="seconds")
-    push_status["last_error"] = None
-    push_status["last_title"] = title
+def _split_addresses(value):
+    if isinstance(value,list):
+        items=[str(x) for x in value]
+    else:
+        items=re.split(r"[\s,;]+",str(value or ""))
+    return [x.strip() for x in items if x and x.strip()]
 
-def _safe_push(title: str, message: str, priority: str = "max", tags: str = "rotating_light", event_id=None):
-    try:
-        send_push(title, message, priority, tags)
-        print(f"Phone push sent: {title}")
-        if event_id: update_event(event_id,push="SENT")
-    except Exception as e:
-        push_status["last_error"] = str(e)
-        push_status["last_title"] = title
-        print(f"Phone push notification error: {e}")
-        if event_id: update_event(event_id,push="FAILED: "+str(e)[:80])
+def parse_address_list(value,label):
+    out=[]
+    for addr in _split_addresses(value):
+        if not _ADDRESS_RE.fullmatch(addr):
+            raise HTTPException(status_code=400,detail=f"Invalid {label} address: {addr[:80]}")
+        if addr.lower() not in [a.lower() for a in out]:
+            out.append(addr)
+    if len(out)>MAX_RECIPIENTS:
+        raise HTTPException(status_code=400,detail=f"At most {MAX_RECIPIENTS} {label} addresses")
+    return out
+
+def load_notification_config():
+    with notify_lock:
+        saved=_read_json(NOTIFY_CONFIG_FILE,{})
+    if not isinstance(saved,dict):
+        saved={}
+    emails=saved.get("email_recipients")
+    if not isinstance(emails,list):
+        # First run: start from ALERT_EMAIL in .env (comma-separated allowed).
+        emails=[a for a in _split_addresses(ALERT_EMAIL) if _ADDRESS_RE.fullmatch(a)]
+    sms=saved.get("sms_recipients")
+    if not isinstance(sms,list):
+        sms=[]
+    return {
+        "email_enabled":bool(saved.get("email_enabled",True)),
+        "email_recipients":[str(a) for a in emails],
+        "sms_enabled":bool(saved.get("sms_enabled",True)),
+        "sms_recipients":[str(a) for a in sms],
+        "sender_name":str(saved.get("sender_name") or "ThermoIQ Alerts")[:60],
+        "updated_at":saved.get("updated_at"),
+        "updated_by":saved.get("updated_by"),
+    }
+
+def save_notification_config(data,updated_by):
+    sender_name=str(data.get("sender_name") or "").strip()
+    if not sender_name or len(sender_name)>60 or re.search(r"[\r\n<>\"]",sender_name):
+        raise HTTPException(status_code=400,detail="Sender name must be 1-60 characters without < > \" or line breaks")
+    cfg={
+        "email_enabled":bool(data.get("email_enabled",True)),
+        "email_recipients":parse_address_list(data.get("email_recipients",[]),"email"),
+        "sms_enabled":bool(data.get("sms_enabled",True)),
+        "sms_recipients":parse_address_list(data.get("sms_recipients",[]),"text message"),
+        "sender_name":sender_name,
+        "updated_at":datetime.now(timezone.utc).isoformat(),
+        "updated_by":updated_by,
+    }
+    with notify_lock:
+        _write_json(NOTIFY_CONFIG_FILE,cfg)
+    return load_notification_config()
+
+def smtp_ready():
+    """The sending account in .env is complete."""
+    return bool(GMAIL_SENDER and GMAIL_APP_PASSWORD)
+
+def email_alerts_ready(cfg=None):
+    cfg=cfg or load_notification_config()
+    return smtp_ready() and cfg["email_enabled"] and bool(cfg["email_recipients"])
+
+def sms_alerts_ready(cfg=None):
+    cfg=cfg or load_notification_config()
+    return smtp_ready() and cfg["sms_enabled"] and bool(cfg["sms_recipients"])
+
+def _smtp_connect():
+    if SMTP_PORT==465:
+        smtp=smtplib.SMTP_SSL(SMTP_HOST,SMTP_PORT,timeout=20)
+    else:
+        smtp=smtplib.SMTP(SMTP_HOST,SMTP_PORT,timeout=20)
+        smtp.starttls()
+    smtp.login(GMAIL_SENDER,GMAIL_APP_PASSWORD)
+    return smtp
+
+def _deliver(recipients,subject,body,attachments=None):
+    """Send one message per recipient (recipients never see each other's address).
+    Returns (sent_count, [errors])."""
+    if not smtp_ready():
+        raise RuntimeError("Sender email is not configured in .env (GMAIL_SENDER / GMAIL_APP_PASSWORD)")
+    if not recipients:
+        raise RuntimeError("No recipients are configured on the Settings page")
+    sender=formataddr((load_notification_config()["sender_name"],GMAIL_SENDER))
+    sent=0; errors=[]
+    with _smtp_connect() as smtp:
+        for to_addr in recipients:
+            msg=EmailMessage(); msg["From"]=sender; msg["To"]=to_addr; msg["Subject"]=subject; msg.set_content(body)
+            for filename,data,mime in (attachments or []):
+                maintype,subtype=mime.split("/",1) if "/" in mime else ("application","octet-stream")
+                msg.add_attachment(data,maintype=maintype,subtype=subtype,filename=filename)
+            try:
+                smtp.send_message(msg); sent+=1
+            except Exception as e:
+                errors.append(f"{to_addr}: {e}")
+    return sent,errors
+
+def _result_text(sent,errors):
+    if not errors:
+        return "SENT" if sent==1 else f"SENT {sent}"
+    total=sent+len(errors)
+    return f"SENT {sent}/{total} · FAILED: {errors[0][:60]}"
+
+def send_email(subject,body,recipient=None,attachments=None):
+    """Email the alarm/report recipients (or the given address / list). Raises if nothing was delivered."""
+    recipients=_split_addresses(recipient) if recipient else load_notification_config()["email_recipients"]
+    sent,errors=_deliver(recipients,subject,body,attachments)
+    if not sent:
+        raise RuntimeError(errors[0] if errors else "No email was sent")
+    return sent,errors
+
+def send_text(message):
+    """Text the SMS recipients through their carrier's email-to-text address."""
+    recipients=load_notification_config()["sms_recipients"]
+    # Plain ASCII: carrier gateways often garble other characters.
+    message=message.encode("ascii","replace").decode("ascii")
+    message=message if len(message)<=SMS_MAX_CHARS else message[:SMS_MAX_CHARS-3]+"..."
+    sent,errors=_deliver(recipients,"ThermoIQ",message)
+    if not sent:
+        raise RuntimeError(errors[0] if errors else "No text message was sent")
+    return sent,errors
 
 email_alarm_started={}
 email_alarm_last_sent={}
 email_lock=threading.Lock()
 email_status={"last_success":None,"last_error":None,"last_subject":None}
-
-def gmail_ready():
-    return bool(GMAIL_SENDER and GMAIL_APP_PASSWORD and ALERT_EMAIL)
-
-def send_gmail(subject,body,recipient=None,attachments=None):
-    if not gmail_ready(): raise RuntimeError("Gmail settings are incomplete in .env")
-    to_addr=(recipient or ALERT_EMAIL).strip()
-    msg=EmailMessage(); msg["From"]=GMAIL_SENDER; msg["To"]=to_addr; msg["Subject"]=subject; msg.set_content(body)
-    for item in (attachments or []):
-        filename,data,mime=item
-        maintype,subtype=(mime.split("/",1)+["octet-stream"])[:2] if "/" in mime else ("application","octet-stream")
-        msg.add_attachment(data,maintype=maintype,subtype=subtype,filename=filename)
-    with smtplib.SMTP_SSL("smtp.gmail.com",465,timeout=20) as smtp:
-        smtp.login(GMAIL_SENDER,GMAIL_APP_PASSWORD); smtp.send_message(msg)
+text_status={"last_success":None,"last_error":None,"last_message":None}
 
 def fmt_local_time(dt):
     return dt.astimezone().strftime("%b %d, %Y %I:%M %p")
 
 def _safe_send(subject,body,event_id=None):
     try:
-        send_gmail(subject,body)
+        sent,errors=send_email(subject,body)
         email_status["last_success"]=datetime.now(timezone.utc).isoformat()
-        email_status["last_error"]=None
+        email_status["last_error"]=errors[0] if errors else None
         email_status["last_subject"]=subject
-        print("Gmail sent:",subject)
-        if event_id: update_event(event_id,email="SENT")
+        print(f"Email sent to {sent} recipient(s):",subject)
+        if event_id: update_event(event_id,email=_result_text(sent,errors))
     except Exception as e:
         email_status["last_error"]=str(e)
         email_status["last_subject"]=subject
-        print("Gmail notification error:",repr(e))
+        print("Email notification error:",repr(e))
         if event_id: update_event(event_id,email="FAILED: "+str(e)[:80])
+
+def _safe_text(message,event_id=None):
+    try:
+        sent,errors=send_text(message)
+        text_status["last_success"]=datetime.now(timezone.utc).isoformat()
+        text_status["last_error"]=errors[0] if errors else None
+        text_status["last_message"]=message
+        print(f"Text message sent to {sent} recipient(s):",message)
+        # The event field is still called "push" so older event history keeps its column.
+        if event_id: update_event(event_id,push=_result_text(sent,errors))
+    except Exception as e:
+        text_status["last_error"]=str(e)
+        text_status["last_message"]=message
+        print("Text message notification error:",repr(e))
+        if event_id: update_event(event_id,push="FAILED: "+str(e)[:80])
+
+def _queue_notifications(cfg,subject,body,text,event_id):
+    if email_alerts_ready(cfg): threading.Thread(target=_safe_send,args=(subject,body,event_id),daemon=True).start()
+    if sms_alerts_ready(cfg): threading.Thread(target=_safe_text,args=(text,event_id),daemon=True).start()
 
 def process_email_notifications(devices):
     if not NOTIFICATIONS_ENABLED:
         return
     now=datetime.now(timezone.utc)
+    ncfg=load_notification_config()
+    email_state="QUEUED" if email_alerts_ready(ncfg) else "NOT CONFIGURED"
+    text_state="QUEUED" if sms_alerts_ready(ncfg) else "NOT CONFIGURED"
     with email_lock:
         for d in devices:
             sn=d["logger_sn"]; current=bool(d["alarm"]); previous=email_alarm_state.get(sn)
@@ -1305,28 +1491,22 @@ def process_email_notifications(devices):
                 episode=start_or_resume_downtime(sn,d,now,temp)
                 episode_started=_iso_dt(episode.get("start_utc")) or now
                 email_alarm_started[sn]=episode_started; email_alarm_last_sent[sn]=now; clear_ack(sn)
-                eid=add_event(sn,d["name"],st+" ALARM",temp,d["limit"],d["alarm_type"],
-                              "QUEUED" if gmail_ready() else "NOT CONFIGURED", "QUEUED" if NTFY_TOPIC else "NOT CONFIGURED")
+                eid=add_event(sn,d["name"],st+" ALARM",temp,d["limit"],d["alarm_type"],email_state,text_state)
                 body=(f"PBF TEMPERATURE ALARM\n\nEquipment: {d['name']}\nTemperature: {temp:.1f} C\n"
-                      f"{ll} Limit: {d['limit']:.1f} C\nStatus: {st}\nTime: {fmt_local_time(now)}\n\nLI-COR Temperature Monitoring")
-                if gmail_ready(): threading.Thread(target=_safe_send,args=(f"PBF Temperature Alarm - {d['name']}",body,eid),daemon=True).start()
-                push_title=f"{d['name']} HIGH TEMP" if d["alarm_type"]=="high" else f"{d['name']} LOW TEMP"
-                push_msg=f"{temp:.1f} C | Limit {d['limit']:.1f} C | ALARM ACTIVE"
-                if NTFY_TOPIC: threading.Thread(target=_safe_push,args=(push_title,push_msg,"max","rotating_light",eid),daemon=True).start()
+                      f"{ll} Limit: {d['limit']:.1f} C\nStatus: {st}\nTime: {fmt_local_time(now)}\n\nThermoIQ Temperature Monitoring")
+                text=f"ALARM {d['name']} {'HIGH' if d['alarm_type']=='high' else 'LOW'} TEMP {temp:.1f}C (limit {d['limit']:.1f}C) {now.astimezone(PLANT_TZ):%H:%M}"
+                _queue_notifications(ncfg,f"PBF Temperature Alarm - {d['name']}",body,text,eid)
             elif current and previous is True:
                 update_active_downtime(sn,temp)
                 last_sent=email_alarm_last_sent.get(sn)
                 if last_sent is None or (now-last_sent).total_seconds() >= 300:
                     email_alarm_last_sent[sn]=now; started=email_alarm_started.get(sn,now)
                     mins=max(1,round((now-started).total_seconds()/60))
-                    eid=add_event(sn,d["name"],"5-MIN REMINDER",temp,d["limit"],d["alarm_type"],
-                                  "QUEUED" if gmail_ready() else "NOT CONFIGURED", "QUEUED" if NTFY_TOPIC else "NOT CONFIGURED", f"Active {mins} min")
+                    eid=add_event(sn,d["name"],"5-MIN REMINDER",temp,d["limit"],d["alarm_type"],email_state,text_state,f"Active {mins} min")
                     body=(f"PBF TEMPERATURE ALARM - 5 MIN REMINDER\n\nEquipment: {d['name']}\nTemperature: {temp:.1f} C\n{ll} Limit: {d['limit']:.1f} C\n"
-                          f"Status: {st} - STILL ACTIVE\nAlarm Active: {mins} minutes\nTime: {fmt_local_time(now)}\n\nLI-COR Temperature Monitoring")
-                    if gmail_ready(): threading.Thread(target=_safe_send,args=(f"PBF Temperature Alarm 5-Min Reminder - {d['name']}",body,eid),daemon=True).start()
-                    push_title=f"{d['name']} HIGH TEMP" if d["alarm_type"]=="high" else f"{d['name']} LOW TEMP"
-                    push_msg=f"{temp:.1f} C | Limit {d['limit']:.1f} C | STILL ACTIVE {mins} min"
-                    if NTFY_TOPIC: threading.Thread(target=_safe_push,args=(push_title,push_msg,"max","rotating_light",eid),daemon=True).start()
+                          f"Status: {st} - STILL ACTIVE\nAlarm Active: {mins} minutes\nTime: {fmt_local_time(now)}\n\nThermoIQ Temperature Monitoring")
+                    text=f"STILL ACTIVE {mins} min: {d['name']} {temp:.1f}C (limit {d['limit']:.1f}C)"
+                    _queue_notifications(ncfg,f"PBF Temperature Alarm 5-Min Reminder - {d['name']}",body,text,eid)
             elif not current and previous is True:
                 started=email_alarm_started.pop(sn,None); email_alarm_last_sent.pop(sn,None); clear_ack(sn)
                 # If the temperature is still outside the limit but monitoring was intentionally
@@ -1343,11 +1523,10 @@ def process_email_notifications(devices):
                         duration=f"{max(1,round(float(closed_episode.get('duration_minutes',0))))} minutes"
                     else:
                         duration="Unknown" if not started else f"{max(1,round((now-started).total_seconds()/60))} minutes"
-                    eid=add_event(sn,d["name"],"RETURN TO NORMAL",temp,d["limit"],d["alarm_type"],
-                                  "QUEUED" if gmail_ready() else "NOT CONFIGURED", "QUEUED" if NTFY_TOPIC else "NOT CONFIGURED", "Duration "+duration)
-                    body=(f"PBF TEMPERATURE NORMAL\n\nEquipment: {d['name']}\nTemperature: {temp:.1f} C\nStatus: RETURNED TO NORMAL\nAlarm Duration: {duration}\nTime: {fmt_local_time(now)}\n\nLI-COR Temperature Monitoring")
-                    if gmail_ready(): threading.Thread(target=_safe_send,args=(f"PBF Temperature Normal - {d['name']}",body,eid),daemon=True).start()
-                    if NTFY_TOPIC: threading.Thread(target=_safe_push,args=(f"{d['name']} TEMP NORMAL",f"{temp:.1f} C | Alarm cleared | Duration {duration}","high","white_check_mark",eid),daemon=True).start()
+                    eid=add_event(sn,d["name"],"RETURN TO NORMAL",temp,d["limit"],d["alarm_type"],email_state,text_state,"Duration "+duration)
+                    body=(f"PBF TEMPERATURE NORMAL\n\nEquipment: {d['name']}\nTemperature: {temp:.1f} C\nStatus: RETURNED TO NORMAL\nAlarm Duration: {duration}\nTime: {fmt_local_time(now)}\n\nThermoIQ Temperature Monitoring")
+                    text=f"NORMAL {d['name']} {temp:.1f}C - alarm cleared after {duration}"
+                    _queue_notifications(ncfg,f"PBF Temperature Normal - {d['name']}",body,text,eid)
             email_alarm_state[sn]=current
 
 
@@ -1360,42 +1539,17 @@ LOGGERS={
 "22547310":{"id":"BP2","name":"Bagel Proofer 2","alarm_type":"low","limit":30.0},
 "22212731":{"id":"PLANT","name":"PBF Plant Temperature","model":"MX1101","alarm_type":"monitor","limit":0.0}}
 
-app=FastAPI(title="PBF Rise Baking Burnaby Dashboard v6.2.2 Cloud Edition")
-
-@app.get("/api/push-status")
-def api_push_status():
-    return {
-        "configured": bool(NTFY_TOPIC),
-        "service": "ntfy",
-        "last_success": push_status.get("last_success"),
-        "last_error": push_status.get("last_error"),
-        "last_title": push_status.get("last_title"),
-        "windows_trust_store": TRUSTSTORE_ACTIVE,
-    }
-
-@app.post("/api/test-push")
-def api_test_push():
-    title = "PBF ALARM TEST"
-    body = "34.2 C | HIGH TEMP test | iPhone alerts are working"
-    if not NTFY_TOPIC:
-        return {"ok": False, "configured": False, "error": "NTFY_TOPIC is not configured"}
-    try:
-        send_push(title, body, "max", "rotating_light")
-        return {"ok": True, "configured": True}
-    except Exception as e:
-        push_status["last_error"] = str(e)
-        push_status["last_title"] = title
-        return {"ok": False, "configured": True, "error": str(e)}
+app=FastAPI(title="ThermoIQ - PBF Burnaby Temperature Dashboard v6.2.3 Cloud Edition")
 
 @app.get("/api/deployment-status")
 def api_deployment_status():
     return {
-        "version":"6.2.2",
+        "version":"6.2.3",
         "edition":"OVH Cloud",
         "deployment_role":DEPLOYMENT_ROLE,
         "automatic_notifications_enabled":NOTIFICATIONS_ENABLED,
-        "gmail_configured":gmail_ready(),
-        "ntfy_configured":bool(NTFY_TOPIC),
+        "email_configured":email_alerts_ready(),
+        "text_message_configured":sms_alerts_ready(),
     }
 
 app.mount("/static",StaticFiles(directory=APP_DIR/"static"),name="static")
@@ -1551,7 +1705,7 @@ async def current():
     # Refresh acknowledgement values in case a new transition cleared one.
     ackmap=get_alarm_state().get("acked",{})
     for d in out: d["acked"]=bool(ackmap.get(d["logger_sn"],False)) if d["alarm"] else False
-    return {"devices":out,"server_utc":now.isoformat(),"gmail_configured":gmail_ready()}
+    return {"devices":out,"server_utc":now.isoformat(),"gmail_configured":email_alerts_ready()}
 
 
 @app.get("/api/v501-status")
@@ -1561,7 +1715,7 @@ async def v501_status():
     with event_lock:
         events = _read_json(EVENT_FILE, [])
     return {
-        "version": "6.2.2",
+        "version": "6.2.3",
         "logger_count": len(cur.get("devices", [])),
         "loggers": [{"name": d.get("name"), "logger_sn": d.get("logger_sn"), "comm_status": d.get("comm_status"), "age_minutes": d.get("age_minutes")} for d in cur.get("devices", [])],
         "alarm_event_count": len(events),
@@ -1715,7 +1869,67 @@ def admin_get_config(request: Request):
         "operator_configured":bool(OPERATOR_PASSWORD_HASH),
         "operator_username":OPERATOR_USERNAME,
         "report_config":load_report_config(),
+        # Recipient lists are personal data: Admin only.
+        "notification_config":notification_settings_payload() if info["role"]=="admin" else None,
     }
+
+def notification_settings_payload():
+    return {**load_notification_config(),
+            "sender_email":GMAIL_SENDER,
+            "smtp_host":SMTP_HOST,
+            "sender_configured":smtp_ready(),
+            "email_status":email_status,
+            "text_status":text_status}
+
+@app.post("/api/admin/notifications")
+async def admin_save_notifications(request: Request):
+    info=require_admin(request)
+    user=f"{info['username']} ({info['role']})"
+    try:
+        data=await request.json()
+    except Exception:
+        data={}
+    old=load_notification_config()
+    new=save_notification_config(data,user)
+    changes=[]
+    if old["email_recipients"]!=new["email_recipients"]: changes.append(f"email recipients: {len(new['email_recipients'])}")
+    if old["sms_recipients"]!=new["sms_recipients"]: changes.append(f"text recipients: {len(new['sms_recipients'])}")
+    if old["email_enabled"]!=new["email_enabled"]: changes.append("email alerts "+("ON" if new["email_enabled"] else "OFF"))
+    if old["sms_enabled"]!=new["sms_enabled"]: changes.append("text alerts "+("ON" if new["sms_enabled"] else "OFF"))
+    if old["sender_name"]!=new["sender_name"]: changes.append(f"sender name: {new['sender_name']}")
+    if changes:
+        add_event("CONFIG","Notifications","NOTIFICATION SETTINGS CHANGED",
+                  detail="; ".join(changes)+f" by {user}",actor=info["username"],role=info["role"],category="CONFIG")
+    return {"ok":True,"notification_config":notification_settings_payload()}
+
+@app.post("/api/admin/notifications/test-email")
+async def admin_test_notification_email(request: Request):
+    info=require_admin(request)
+    now=datetime.now(timezone.utc)
+    body=(f"THERMOIQ TEST EMAIL\n\nThis is a test of the alarm email recipients.\n"
+          f"Sent by: {info['username']}\nTime: {fmt_local_time(now)}\n\nThermoIQ Temperature Monitoring")
+    try:
+        sent,errors=await asyncio.to_thread(send_email,"ThermoIQ Test Email",body)
+    except Exception as e:
+        email_status["last_error"]=str(e)
+        raise HTTPException(status_code=500,detail=f"Email send failed: {e}")
+    email_status["last_success"]=now.isoformat(); email_status["last_error"]=errors[0] if errors else None
+    email_status["last_subject"]="ThermoIQ Test Email"
+    return {"ok":True,"sent":sent,"errors":errors}
+
+@app.post("/api/admin/notifications/test-text")
+async def admin_test_notification_text(request: Request):
+    require_admin(request)
+    now=datetime.now(timezone.utc)
+    message=f"ThermoIQ TEST text alert. Alarms will look like this. {now.astimezone(PLANT_TZ):%H:%M}"
+    try:
+        sent,errors=await asyncio.to_thread(send_text,message)
+    except Exception as e:
+        text_status["last_error"]=str(e)
+        raise HTTPException(status_code=500,detail=f"Text message failed: {e}")
+    text_status["last_success"]=now.isoformat(); text_status["last_error"]=errors[0] if errors else None
+    text_status["last_message"]=message
+    return {"ok":True,"sent":sent,"errors":errors}
 
 @app.post("/api/admin/schedule/all")
 async def admin_update_all_schedules(request: Request):
@@ -1725,20 +1939,15 @@ async def admin_update_all_schedules(request: Request):
     logger placed in NOT IN USE mode by an Administrator.
     """
     info=require_settings_access(request)
-    user=f"{info['username']} ({info['role']})"
+    role=info["role"]
+    user=f"{info['username']} ({role})"
     try:
         data=await request.json()
     except Exception:
         data={}
 
-    schedule_enabled=bool(data.get("schedule_enabled",True))
-    schedule_days=_normalize_schedule_days(data.get("schedule_days",[0,1,2,3,4]))
-    schedule_start=_valid_hhmm(data.get("schedule_start","00:00"),"")
-    schedule_end=_valid_hhmm(data.get("schedule_end","00:00"),"")
-    if not schedule_start or not schedule_end:
-        raise HTTPException(status_code=400,detail="Schedule start/end must use HH:MM")
-    if schedule_enabled and not schedule_days:
-        raise HTTPException(status_code=400,detail="Select at least one ON day for the alarm schedule")
+    data.setdefault("schedule_enabled",True)
+    schedule_enabled,schedule_week=schedule_from_payload(data,{})
 
     updated=[]
     for sn in LOGGERS:
@@ -1746,8 +1955,7 @@ async def admin_update_all_schedules(request: Request):
             continue
         old=get_runtime_cfg(sn)
         old_effective=bool(old.get("effective_monitoring_enabled",old.get("monitoring_enabled",True)))
-        new=save_runtime_cfg(sn,schedule_enabled=schedule_enabled,schedule_days=schedule_days,
-                             schedule_start=schedule_start,schedule_end=schedule_end,updated_by=user)
+        new=save_runtime_cfg(sn,schedule_enabled=schedule_enabled,schedule_week=schedule_week,updated_by=user)
         new_effective=bool(new.get("effective_monitoring_enabled",new.get("monitoring_enabled",True)))
         add_event(sn,new["name"],"ALARM SCHEDULE CHANGED",limit=new["limit"],alarm_type=new["alarm_type"],
                   detail=(f"Applied to ALL loggers: {new['schedule_summary']} by {user}; "
@@ -1775,14 +1983,7 @@ async def admin_update_config(sn: str, request: Request):
     old=get_runtime_cfg(sn)
 
     # Schedule fields are available to both Admin and Operator.
-    schedule_enabled=bool(data.get("schedule_enabled",old.get("schedule_enabled",False)))
-    schedule_days=_normalize_schedule_days(data.get("schedule_days",old.get("schedule_days",[0,1,2,3,4,5,6])))
-    schedule_start=_valid_hhmm(data.get("schedule_start",old.get("schedule_start","00:00")),"")
-    schedule_end=_valid_hhmm(data.get("schedule_end",old.get("schedule_end","00:00")),"")
-    if not schedule_start or not schedule_end:
-        raise HTTPException(status_code=400,detail="Schedule start/end must use HH:MM")
-    if schedule_enabled and not schedule_days:
-        raise HTTPException(status_code=400,detail="Select at least one day for the alarm schedule")
+    schedule_enabled,schedule_week=schedule_from_payload(data,old)
 
     old_effective=bool(old.get("effective_monitoring_enabled",old.get("monitoring_enabled",True)))
 
@@ -1790,8 +1991,7 @@ async def admin_update_config(sn: str, request: Request):
         forbidden={"limit","monitoring_enabled","mode","temperature_offset","humidity_offset"}.intersection(data.keys())
         if forbidden:
             raise HTTPException(status_code=403,detail="Operator access is limited to the alarm schedule")
-        new=save_runtime_cfg(sn,schedule_enabled=schedule_enabled,schedule_days=schedule_days,
-                             schedule_start=schedule_start,schedule_end=schedule_end,updated_by=user)
+        new=save_runtime_cfg(sn,schedule_enabled=schedule_enabled,schedule_week=schedule_week,updated_by=user)
     else:
         limit=data.get("limit",old["limit"])
         try: limit=float(limit)
@@ -1809,8 +2009,7 @@ async def admin_update_config(sn: str, request: Request):
         if not -50.0 <= humidity_offset <= 50.0:
             raise HTTPException(status_code=400,detail="Humidity offset must be between -50.0 and +50.0 %RH")
         new=save_runtime_cfg(sn,limit=limit,monitoring_enabled=monitoring_enabled,mode=mode,
-                             schedule_enabled=schedule_enabled,schedule_days=schedule_days,
-                             schedule_start=schedule_start,schedule_end=schedule_end,
+                             schedule_enabled=schedule_enabled,schedule_week=schedule_week,
                              temperature_offset=temperature_offset,humidity_offset=humidity_offset,updated_by=user)
 
         if float(old["limit"]) != float(new["limit"]):
@@ -1836,9 +2035,7 @@ async def admin_update_config(sn: str, request: Request):
     new_effective=bool(new.get("effective_monitoring_enabled",new.get("monitoring_enabled",True)))
     schedule_changed=(
         bool(old.get("schedule_enabled",False)) != schedule_enabled or
-        _normalize_schedule_days(old.get("schedule_days",[])) != schedule_days or
-        old.get("schedule_start","00:00") != schedule_start or
-        old.get("schedule_end","00:00") != schedule_end
+        old.get("schedule_week") != schedule_week
     )
     if schedule_changed:
         add_event(sn,new["name"],"ALARM SCHEDULE CHANGED",limit=new["limit"],alarm_type=new["alarm_type"],
@@ -1900,7 +2097,7 @@ def audit_status(request: Request):
     now=datetime.now(timezone.utc)
     cfg=load_audit_config()
     return {
-        "version":"6.2.2",
+        "version":"6.2.3",
         "server_utc":now.isoformat(),
         "server_pacific":now.astimezone(PLANT_TZ).isoformat(),
         "timezone":"America/Vancouver",
@@ -2034,32 +2231,37 @@ def admin_audit_latest_backup(request: Request):
 
 @app.post("/api/test-email")
 async def test_email():
-    if not gmail_ready(): raise HTTPException(status_code=400,detail="Gmail settings are incomplete in .env")
+    if not email_alerts_ready(): raise HTTPException(status_code=400,detail="Email is not configured (sender in .env, recipients on the Settings page)")
     now=datetime.now(timezone.utc)
-    body=f"PBF TEMPERATURE DASHBOARD TEST EMAIL\n\nGmail notifications are configured correctly.\nTime: {fmt_local_time(now)}\n\nLI-COR Temperature Monitoring"
+    body=f"PBF TEMPERATURE DASHBOARD TEST EMAIL\n\nEmail notifications are configured correctly.\nTime: {fmt_local_time(now)}\n\nThermoIQ Temperature Monitoring"
     try:
-        await asyncio.to_thread(send_gmail,"PBF Temperature Dashboard - Test Email",body)
-        return {"ok":True,"message":f"Test email sent to {ALERT_EMAIL}"}
+        sent,_=await asyncio.to_thread(send_email,"PBF Temperature Dashboard - Test Email",body)
+        return {"ok":True,"message":f"Test email sent to {sent} recipient(s)"}
     except Exception as e:
         raise HTTPException(status_code=500,detail=f"Email send failed: {str(e)}")
 
 @app.get("/api/email-status")
 def get_email_status():
-    return {"configured":gmail_ready(),"sender":GMAIL_SENDER,"recipient":ALERT_EMAIL,**email_status}
+    # Public endpoint: report counts only, never the recipient addresses.
+    cfg=load_notification_config()
+    return {"configured":email_alerts_ready(cfg),"sender":GMAIL_SENDER,
+            "recipient_count":len(cfg["email_recipients"]),
+            "text_message_configured":sms_alerts_ready(cfg),"text_recipient_count":len(cfg["sms_recipients"]),
+            **email_status}
 
 @app.post("/api/test-alarm-email")
 async def test_alarm_email():
-    if not gmail_ready(): raise HTTPException(status_code=400,detail="Gmail settings are incomplete in .env")
+    if not email_alerts_ready(): raise HTTPException(status_code=400,detail="Email is not configured (sender in .env, recipients on the Settings page)")
     now=datetime.now(timezone.utc)
     body=(f"PBF TEMPERATURE ALARM - TEST\n\nEquipment: Tortilla L3 Cooler\nTemperature: 34.20 C\n"
           f"High Limit: 13.00 C\nStatus: HIGH TEMPERATURE - TEST\nTime: {fmt_local_time(now)}\n\n"
-          f"This is a test of the automatic alarm email format.\nLI-COR Temperature Monitoring")
+          f"This is a test of the automatic alarm email format.\nThermoIQ Temperature Monitoring")
     try:
-        await asyncio.to_thread(send_gmail,"PBF Temperature Alarm TEST - Tortilla L3 Cooler",body)
+        sent,_=await asyncio.to_thread(send_email,"PBF Temperature Alarm TEST - Tortilla L3 Cooler",body)
         email_status["last_success"]=datetime.now(timezone.utc).isoformat()
         email_status["last_error"]=None
         email_status["last_subject"]="PBF Temperature Alarm TEST - Tortilla L3 Cooler"
-        return {"ok":True,"message":f"Alarm-format test sent to {ALERT_EMAIL}"}
+        return {"ok":True,"message":f"Alarm-format test sent to {sent} recipient(s)"}
     except Exception as e:
         email_status["last_error"]=str(e)
         raise HTTPException(status_code=500,detail=f"Email send failed: {str(e)}")
@@ -2142,7 +2344,7 @@ async def build_maintenance_report_csv(hours=24,end_utc=None):
     output=io.StringIO(newline="")
     w=csv.writer(output)
     w.writerow(["PBF RISE BAKING BURNABY - TEMPERATURE ALARM DOWNTIME REPORT"])
-    w.writerow(["Report Version","v6.2.2"])
+    w.writerow(["Report Version","v6.2.3"])
     w.writerow(["Report Window Start (Pacific)",_pt_text(start_utc)])
     w.writerow(["Report Window End (Pacific)",_pt_text(end_utc)])
     w.writerow(["Window Hours",hours])
@@ -2245,7 +2447,7 @@ async def build_maintenance_report_csv(hours=24,end_utc=None):
 
     w.writerow([])
     w.writerow(["ALARM EVENT AUDIT TRAIL"])
-    w.writerow(["Time (Pacific)","Logger","Serial","Event","Reading (C)","Limit (C)","Email","Phone Push","Detail"])
+    w.writerow(["Time (Pacific)","Logger","Serial","Event","Reading (C)","Limit (C)","Email","Text Message","Detail"])
     for e in alarm_events:
         w.writerow([
             _pt_text(_iso_dt(e.get("time"))),e.get("name",""),e.get("logger_sn",""),e.get("event",""),
@@ -2284,7 +2486,7 @@ def build_all_logger_temperature_csv(temp_rows,start_utc,end_utc):
 async def send_maintenance_report(hours=None,recipient=None,manual=False):
     cfg=load_report_config()
     hours=int(hours or cfg.get("hours",24))
-    to_addr=(recipient or cfg.get("recipient") or ALERT_EMAIL).strip()
+    to_addr=(recipient or cfg.get("recipient") or ", ".join(load_notification_config()["email_recipients"])).strip()
     report_bytes,report_name,temp_rows,api_error,start_utc,end_utc=await build_maintenance_report_csv(hours)
     temp_bytes=build_all_logger_temperature_csv(temp_rows,start_utc,end_utc)
     temp_name=f"PBF_All_Logger_Temperature_History_{hours}h_{end_utc.astimezone(PLANT_TZ).strftime('%Y%m%d_%H%M')}.csv"
@@ -2304,14 +2506,14 @@ async def send_maintenance_report(hours=None,recipient=None,manual=False):
         (report_name,report_bytes,"text/csv"),
         (temp_name,temp_bytes,"text/csv"),
     ]
-    await asyncio.to_thread(send_gmail,subject,body,to_addr,attachments)
+    await asyncio.to_thread(send_email,subject,body,to_addr,attachments)
     add_event("REPORT","Maintenance Report","24H MAINTENANCE REPORT EMAILED",
               detail=f"Sent to {to_addr}; {hours}h window; manual={manual}")
     return {"ok":True,"recipient":to_addr,"hours":hours,"report_file":report_name,"temperature_file":temp_name}
 
 async def maybe_send_daily_maintenance_report():
     # Prevent duplicate reporting if a backup/test deployment is ever started.
-    if DEPLOYMENT_ROLE!="CLOUD-PRIMARY" or not NOTIFICATIONS_ENABLED or not gmail_ready():
+    if DEPLOYMENT_ROLE!="CLOUD-PRIMARY" or not NOTIFICATIONS_ENABLED or not smtp_ready():
         return
     cfg=load_report_config()
     if not cfg.get("enabled",True):
