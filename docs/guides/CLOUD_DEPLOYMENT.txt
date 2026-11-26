@@ -1,5 +1,5 @@
 PBF Rise Baking Burnaby Temperature Dashboard
-v6.2.0 OVH Cloud Edition
+$16.2.1 OVH Cloud Edition
 
 ARCHITECTURE
 LI-COR Cloud -> OVH VPS -> PBF Dashboard -> Gmail/ntfy

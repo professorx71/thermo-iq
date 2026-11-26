@@ -1,0 +1,4 @@
+ThermoIQ release v6.2.1
+Released 2026-11-25.
+
+- fixed lock and add release

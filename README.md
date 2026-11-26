@@ -1,6 +1,6 @@
 # PBF Rise Baking Burnaby: Temperature Monitoring Dashboard
 
-**Current version: v6.2.0 (Cloud Edition)**
+$16.2.1 (Cloud Edition)**
 
 A web dashboard that monitors the plant's coolers and proofers through **LI-COR HOBO loggers**. It reads live temperature and humidity from **LI-COR Cloud** and raises alarms when a reading goes past its limit. Alarms are sent by email (Gmail) and phone push (ntfy). The dashboard also shows trends, exports CSV and PDF reports, and keeps an audit trail with calibration and deviation records.
 
@@ -713,6 +713,7 @@ Version-specific fixes are documented in [docs/release-notes/](docs/release-note
 | v5.3 | Admin password changes, cache fix, weekday/24 h scheduler, calibration and roles, plant logger |
 | v6.0 | Cloud edition (Docker/Caddy), username/password rules, auth fixes |
 | v6.1 | Maintenance downtime report, 7-day trend download, calendar history export |
+| **v6.2.1** | fixed lock and add release |
 | **v6.2.0** | **Audit controls:** calibration records, deviations, expanded audit trail, retention, daily backups |
 | *(unreleased)* | Project reorganized into `app/`, `tools/`, `windows/`, `cloud/` and `docs/`. No change to application behaviour. |
 
