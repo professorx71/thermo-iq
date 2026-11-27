@@ -402,12 +402,12 @@ footer{background:#08131c;border-top:1px solid #163244;margin-top:26px}
 
 /* ===== v6.2.7 header: bigger bold brand, centered site name, date under clock ===== */
 .topbar{position:sticky}
-.site-name{position:absolute;top:12px;left:50%;transform:translateX(-50%);font-size:13px;font-weight:800;letter-spacing:2.4px;text-transform:uppercase;color:#63c8e2;white-space:nowrap;pointer-events:none}
+.site-name{position:absolute;top:10px;left:50%;transform:translateX(-50%);font-size:22px;font-weight:900;letter-spacing:3px;text-transform:uppercase;color:#63c8e2;white-space:nowrap;pointer-events:none}
 .brand-logo{width:104px;height:104px}
 .wordmark{font-size:38px;font-weight:900;letter-spacing:-.6px}
-.conn-date{color:#a9c0cf}
+.conn-date{color:#fff}
 @media(max-width:1100px){.site-name{position:static;transform:none;order:-1;text-align:center}}
-@media(max-width:700px){.brand-logo{width:68px;height:68px}.wordmark{font-size:28px}}
+@media(max-width:700px){.brand-logo{width:68px;height:68px}.wordmark{font-size:28px}.site-name{font-size:17px;letter-spacing:2px}}
 
 /* ===== v6.2.7 navigation tabs: bigger, one color per tab, glow on the selected tab ===== */
 nav{gap:10px;padding:7px;border-radius:16px}
@@ -419,10 +419,13 @@ nav a[href="/trends"]{--tab:#3ce39a;--tab-rgb:60,227,154}
 nav a[href="/events"]{--tab:#ffb259;--tab-rgb:255,178,89}
 nav a[href="/audit"]{--tab:#b99cff;--tab-rgb:185,156,255}
 nav a[href="/settings"]{--tab:#f2cf5b;--tab-rgb:242,207,91}
-nav a:hover{background:rgba(var(--tab-rgb),.22)!important;box-shadow:0 0 16px rgba(var(--tab-rgb),.55),0 0 34px rgba(var(--tab-rgb),.25)!important;transform:translateY(-1px)}
-nav a.active{color:#08131c!important;text-shadow:0 0 6px rgba(255,255,255,.6);position:relative;z-index:1;background:var(--tab)!important;border-color:var(--tab);
-  box-shadow:0 0 14px rgba(var(--tab-rgb),1),0 0 36px rgba(var(--tab-rgb),.80),0 0 70px rgba(var(--tab-rgb),.55),0 0 110px rgba(var(--tab-rgb),.30)!important;
+nav a:hover{background:rgba(var(--tab-rgb),.20)!important;box-shadow:0 0 14px rgba(var(--tab-rgb),.42),0 0 24px rgba(var(--tab-rgb),.12)!important;transform:translateY(-1px)}
+nav a.active{color:#08131c!important;text-shadow:0 0 4px rgba(255,255,255,.35);position:relative;z-index:1;background:var(--tab)!important;border-color:var(--tab);
+  box-shadow:0 0 12px rgba(var(--tab-rgb),.92),0 0 31px rgba(var(--tab-rgb),.68),0 0 59px rgba(var(--tab-rgb),.42),0 0 80px rgba(var(--tab-rgb),.15)!important;
   animation:tabGlow 2.4s ease-in-out infinite}
-@keyframes tabGlow{50%{box-shadow:0 0 20px rgba(var(--tab-rgb),1),0 0 50px rgba(var(--tab-rgb),.95),0 0 95px rgba(var(--tab-rgb),.70),0 0 140px rgba(var(--tab-rgb),.40)}}
+@keyframes tabGlow{50%{box-shadow:0 0 17px rgba(var(--tab-rgb),1),0 0 42px rgba(var(--tab-rgb),.83),0 0 78px rgba(var(--tab-rgb),.55),0 0 100px rgba(var(--tab-rgb),.20)}}
 @media(prefers-reduced-motion:reduce){nav a.active{animation:none}nav a:hover{transform:none}}
 @media(max-width:700px){nav a{font-size:15px;padding:11px 15px}}
+.topbar h1{font-size:22px}
+.connection small{color:#fff!important;font-weight:800;font-size:14px}
+@media(max-width:700px){.topbar h1{font-size:18px}}

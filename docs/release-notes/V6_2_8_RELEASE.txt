@@ -1,0 +1,4 @@
+ThermoIQ release v6.2.8
+Released 2026-11-26.
+
+- Softer tab glow, larger site name, smaller title, white bold date and time
