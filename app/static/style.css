@@ -399,3 +399,30 @@ footer{background:#08131c;border-top:1px solid #163244;margin-top:26px}
 @media(max-width:760px){.sms-builder{grid-template-columns:1fr}.week-tools{grid-template-columns:1fr}
   .week-row{grid-template-columns:1fr 1fr 1fr 1fr;row-gap:4px;padding:6px 0;border-bottom:1px solid #1d3a4c}
   .week-row>:nth-child(3){grid-column:3/5}.week-row>:nth-child(4){grid-column:1/3}.week-row>:nth-child(5){grid-column:3/5}}
+
+/* ===== v6.2.7 header: bigger bold brand, centered site name, date under clock ===== */
+.topbar{position:sticky}
+.site-name{position:absolute;top:12px;left:50%;transform:translateX(-50%);font-size:13px;font-weight:800;letter-spacing:2.4px;text-transform:uppercase;color:#63c8e2;white-space:nowrap;pointer-events:none}
+.brand-logo{width:104px;height:104px}
+.wordmark{font-size:38px;font-weight:900;letter-spacing:-.6px}
+.conn-date{color:#a9c0cf}
+@media(max-width:1100px){.site-name{position:static;transform:none;order:-1;text-align:center}}
+@media(max-width:700px){.brand-logo{width:68px;height:68px}.wordmark{font-size:28px}}
+
+/* ===== v6.2.7 navigation tabs: bigger, one color per tab, glow on the selected tab ===== */
+nav{gap:10px;padding:7px;border-radius:16px}
+nav a{--tab:#49d6ff;--tab-rgb:73,214,255;font-size:17px;font-weight:800;padding:14px 22px;border-radius:12px;color:var(--tab)!important;
+  background:rgba(var(--tab-rgb),.08)!important;border:1px solid rgba(var(--tab-rgb),.28);box-shadow:none!important;
+  transition:background .18s,box-shadow .18s,color .18s,transform .18s}
+nav a[href="/"]{--tab:#49d6ff;--tab-rgb:73,214,255}
+nav a[href="/trends"]{--tab:#3ce39a;--tab-rgb:60,227,154}
+nav a[href="/events"]{--tab:#ffb259;--tab-rgb:255,178,89}
+nav a[href="/audit"]{--tab:#b99cff;--tab-rgb:185,156,255}
+nav a[href="/settings"]{--tab:#f2cf5b;--tab-rgb:242,207,91}
+nav a:hover{background:rgba(var(--tab-rgb),.22)!important;box-shadow:0 0 16px rgba(var(--tab-rgb),.55),0 0 34px rgba(var(--tab-rgb),.25)!important;transform:translateY(-1px)}
+nav a.active{color:#08131c!important;text-shadow:0 0 6px rgba(255,255,255,.6);position:relative;z-index:1;background:var(--tab)!important;border-color:var(--tab);
+  box-shadow:0 0 14px rgba(var(--tab-rgb),1),0 0 36px rgba(var(--tab-rgb),.80),0 0 70px rgba(var(--tab-rgb),.55),0 0 110px rgba(var(--tab-rgb),.30)!important;
+  animation:tabGlow 2.4s ease-in-out infinite}
+@keyframes tabGlow{50%{box-shadow:0 0 20px rgba(var(--tab-rgb),1),0 0 50px rgba(var(--tab-rgb),.95),0 0 95px rgba(var(--tab-rgb),.70),0 0 140px rgba(var(--tab-rgb),.40)}}
+@media(prefers-reduced-motion:reduce){nav a.active{animation:none}nav a:hover{transform:none}}
+@media(max-width:700px){nav a{font-size:15px;padding:11px 15px}}

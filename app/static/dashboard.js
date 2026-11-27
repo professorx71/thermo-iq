@@ -47,7 +47,9 @@ async function loadCurrent() {
     render(lastData);
     $("conn").innerHTML =
       '<span class="good">● LI-COR CONNECTED</span><br><small>' +
-      new Date().toLocaleTimeString() + '</small>';
+      new Date().toLocaleTimeString() + '</small><br><small class="conn-date">' +
+      new Date().toLocaleDateString([], {weekday: "short", month: "long", day: "numeric", year: "numeric"}) +
+      '</small>';
   } catch (e) {
     $("conn").innerHTML = '<span class="bad">● CONNECTION ERROR</span>';
   }

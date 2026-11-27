@@ -757,7 +757,7 @@ def create_audit_backup(reason="scheduled",actor="SYSTEM"):
         "created_utc":now.isoformat(),
         "created_pacific":now.astimezone(PLANT_TZ).isoformat(),
         "timezone":"America/Vancouver",
-        "version":"6.2.6",
+        "version":"6.2.7",
         "reason":reason,
         "actor":actor,
         "note":"Data/config backup only. Secrets in .env are intentionally excluded.",
@@ -863,7 +863,7 @@ async def build_audit_pdf(sn,date_text):
     deviations={str(r.get("episode_id")):r for r in load_deviations()}
 
     dataset={
-        "version":"6.2.6",
+        "version":"6.2.7",
         "date":selected.isoformat(),
         "timezone":"America/Vancouver",
         "logger_serials":serials,
@@ -1553,12 +1553,12 @@ LOGGERS={
 "22547310":{"id":"BP2","name":"Bagel Proofer 2","alarm_type":"low","limit":30.0},
 "22212731":{"id":"PLANT","name":"PBF Plant Temperature","model":"MX1101","alarm_type":"monitor","limit":0.0}}
 
-app=FastAPI(title="ThermoIQ - PBF Burnaby Temperature Dashboard v6.2.6 Cloud Edition")
+app=FastAPI(title="ThermoIQ - PBF Burnaby Temperature Dashboard v6.2.7 Cloud Edition")
 
 @app.get("/api/deployment-status")
 def api_deployment_status():
     return {
-        "version":"6.2.6",
+        "version":"6.2.7",
         "edition":"OVH Cloud",
         "deployment_role":DEPLOYMENT_ROLE,
         "automatic_notifications_enabled":NOTIFICATIONS_ENABLED,
@@ -1729,7 +1729,7 @@ async def v501_status():
     with event_lock:
         events = _read_json(EVENT_FILE, [])
     return {
-        "version": "6.2.6",
+        "version": "6.2.7",
         "logger_count": len(cur.get("devices", [])),
         "loggers": [{"name": d.get("name"), "logger_sn": d.get("logger_sn"), "comm_status": d.get("comm_status"), "age_minutes": d.get("age_minutes")} for d in cur.get("devices", [])],
         "alarm_event_count": len(events),
@@ -2112,7 +2112,7 @@ def audit_status(request: Request):
     now=datetime.now(timezone.utc)
     cfg=load_audit_config()
     return {
-        "version":"6.2.6",
+        "version":"6.2.7",
         "server_utc":now.isoformat(),
         "server_pacific":now.astimezone(PLANT_TZ).isoformat(),
         "timezone":"America/Vancouver",
@@ -2359,7 +2359,7 @@ async def build_maintenance_report_csv(hours=24,end_utc=None):
     output=io.StringIO(newline="")
     w=csv.writer(output)
     w.writerow(["PBF RISE BAKING BURNABY - TEMPERATURE ALARM DOWNTIME REPORT"])
-    w.writerow(["Report Version","v6.2.6"])
+    w.writerow(["Report Version","v6.2.7"])
     w.writerow(["Report Window Start (Pacific)",_pt_text(start_utc)])
     w.writerow(["Report Window End (Pacific)",_pt_text(end_utc)])
     w.writerow(["Window Hours",hours])

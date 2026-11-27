@@ -1,0 +1,4 @@
+ThermoIQ release v6.2.7
+Released 2026-11-26.
+
+- New dashboard header and colored navigation tabs
