@@ -1,7 +1,12 @@
 const $=id=>document.getElementById(id);
 let currentRole=null;
 let currentUsername=null;
+let currentRights=[];
 let deviceMap={};
+const can=right=>currentRole==="admin"||currentRights.includes(right);
+const ROLE_TEXT={
+  admin:"Administrator: every setting, user logins and role rights.",
+  engineering:"Engineering login.",operator:"Operator login.",guest:"Guest login."};
 
 async function status(){
   const r=await fetch("/api/admin/status",{cache:"no-store"});
@@ -10,6 +15,7 @@ async function status(){
     $("loginMsg").innerHTML='<span class="bad">Admin password is not configured. Run SET_ADMIN_PASSWORD.bat on the mini-PC.</span>';
   }
   if(x.logged_in){
+    currentRights=x.rights||[];
     showSettings(x.username,x.role);
     await loadConfig();
   }
@@ -21,6 +27,7 @@ async function login(){
   const x=await r.json().catch(()=>({}));
   if(!r.ok){$("loginMsg").innerHTML='<span class="bad">'+(x.detail||"Login failed")+'</span>';return;}
   $("adminPass").value="";
+  currentRights=x.rights||[];
   showSettings(x.username,x.role);
   await loadConfig();
 }
@@ -31,15 +38,31 @@ function showSettings(user,role){
   $("settingsBox").classList.remove("hidden");
   $("loggedInUser").textContent="Logged in: "+user;
   $("roleBadge").textContent=(role||"").toUpperCase();
-  $("roleBadge").classList.toggle("operator",role==="operator");
+  $("roleBadge").classList.toggle("operator",role!=="admin");
   $("securityPanel").classList.toggle("hidden",role!=="admin");
-  $("reportPanel").classList.toggle("hidden",role!=="admin");
-  $("notifyPanel").classList.toggle("hidden",role!=="admin");
-  $("roleDescription").textContent=role==="admin"
-    ? "Administrator access: setpoints, RUNNING / NOT IN USE, calibration offsets, schedules, alarm recipients and account passwords."
-    : "Operator access: alarm notification scheduler only. Setpoints, calibration, equipment mode and passwords are locked.";
+  $("reportPanel").classList.toggle("hidden",!can("change_notifications"));
+  $("notifyPanel").classList.toggle("hidden",!can("change_notifications"));
+  $("applyAllBtn").disabled=!can("change_schedule");
+  const allowed=[["change_schedule","alarm schedule"],["change_limits","limits, equipment mode and calibration"],
+    ["change_notifications","recipients and email reports"]].filter(([k])=>can(k)).map(([,t])=>t);
+  $("roleDescription").textContent=(ROLE_TEXT[role]||"")+(role==="admin"?"":
+    (allowed.length?" You may change: "+allowed.join(", ")+".":" Read only: you can view settings but not change them."));
+  if(role==="admin")loadUsers();
 }
 
+// ---- collapsible sections: open/closed state is remembered on this computer ----
+function foldKey(el){return "thermoiq.fold."+el.dataset.fold;}
+function initFolds(root=document){
+  root.querySelectorAll("details[data-fold]").forEach(el=>{
+    const saved=localStorage.getItem(foldKey(el));
+    if(saved!==null)el.open=saved==="1";
+    if(!el.dataset.foldBound){el.dataset.foldBound="1";el.addEventListener("toggle",()=>localStorage.setItem(foldKey(el),el.open?"1":"0"));}
+  });
+}
+function setAllFolds(open){document.querySelectorAll("#settingsBox details[data-fold]").forEach(el=>{if(!el.classList.contains("hidden"))el.open=open;});}
+
+$("adminPass").addEventListener("keydown",e=>{if(e.key==="Enter")login();});
+$("adminUser").addEventListener("keydown",e=>{if(e.key==="Enter")$("adminPass").focus();});
 async function logout(){await fetch("/api/admin/logout",{method:"POST"});location.reload();}
 
 const dayNames=["Mon","Tue","Wed","Thu","Fri","Sat","Sun"];
@@ -118,13 +141,13 @@ async function applyCardScheduleToAll(sn){
 }
 
 function adminControls(d){
-  if(currentRole!=="admin")return "";
+  if(!can("change_limits"))return "";
   const monitorOnly=d.alarm_type==="monitor";
   const alarmFields=monitorOnly
     ? `<div class="monitor-only-note"><b>Temperature + Humidity Monitor</b><br>${d.model||"Logger"} is displayed and logged without a temperature alarm setpoint. Calibration offsets remain available below.</div>`
     : `<label>Temperature alarm setpoint (°C)<input id="limit-${d.logger_sn}" type="number" step="0.1" min="-40" max="100" value="${Number(d.limit).toFixed(1)}"></label>
        <label>Equipment operating mode<select id="mode-${d.logger_sn}"><option value="running" ${d.monitoring_enabled?"selected":""}>RUNNING — permit alarms</option><option value="idle" ${d.monitoring_enabled?"":"selected"}>NOT IN USE — suppress all alarms</option></select></label>`;
-  return `<div class="admin-only-block"><div class="control-section-title">Admin Controls</div>${alarmFields}
+  return `<div class="admin-only-block"><div class="control-section-title">Limits, mode and calibration</div>${alarmFields}
     <div class="calibration-box"><div class="schedule-title">Reading Calibration Offset</div><p class="calibration-help">Adjusted reading = LI-COR raw reading + offset. Use a negative value when the logger reads high; positive when it reads low.</p>
       <div class="calibration-grid"><label>Temperature offset (°C)<input id="temp-offset-${d.logger_sn}" type="number" step="0.1" min="-20" max="20" value="${Number(d.temperature_offset||0).toFixed(1)}"></label>
       <label>Humidity offset (%RH)<input id="rh-offset-${d.logger_sn}" type="number" step="0.1" min="-50" max="50" value="${Number(d.humidity_offset||0).toFixed(1)}"></label></div>
@@ -135,7 +158,7 @@ function adminControls(d){
 function scheduleControls(d){
   if(d.alarm_type==="monitor") return `<div class="schedule-box monitor-only-schedule"><div class="schedule-title">Alarm Notification Scheduler</div><div class="schedule-current good">Not required for this monitor-only logger.</div></div>`;
   const sn=d.logger_sn;
-  return `<div class="schedule-box"><div class="schedule-title">Alarm Notification Scheduler <span class="access-tag">Admin + Operator</span></div>
+  return `<div class="schedule-box"><div class="schedule-title">Alarm Notification Scheduler${can("change_schedule")?"":' <span class="access-tag">view only</span>'}</div>
     <label>Weekly scheduler<select id="schedule-enabled-${sn}"><option value="off" ${d.schedule_enabled?"":"selected"}>OFF — manual mode only</option><option value="on" ${d.schedule_enabled?"selected":""}>ON — follow the daily times below</option></select></label>
     <div class="schedule-label">Daily Alarm ON / OFF times · Pacific Time</div>
     ${weekEditor(d)}
@@ -152,10 +175,9 @@ function scheduleControls(d){
 async function loadConfig(){
   const r=await fetch("/api/admin/config",{cache:"no-store"});
   if(r.status===401||r.status===403){location.reload();return;}
-  const x=await r.json(); currentRole=x.role; currentUsername=x.username; showSettings(x.username,x.role);
+  const x=await r.json(); currentRole=x.role; currentUsername=x.username; currentRights=x.rights||[]; showSettings(x.username,x.role);
   deviceMap=Object.fromEntries((x.devices||[]).map(d=>[String(d.logger_sn),d]));
-  if($("operatorUsername"))$("operatorUsername").value=x.operator_username||"operator";
-  if($("adminUsernameEdit"))$("adminUsernameEdit").value=x.username||"";
+  if($("adminUsernameEdit")&&x.role==="admin"){$("adminUsernameEdit").value=x.username||"";$("adminSignedIn").textContent=x.username||"";}
   if(x.report_config&&$("reportEnabled")){
     $("reportEnabled").value=x.report_config.enabled?"on":"off";
     $("reportTime").value=x.report_config.time||"08:00";
@@ -163,12 +185,28 @@ async function loadConfig(){
     $("reportHours").value=String(x.report_config.hours||24);
   }
   if(x.notification_config)fillNotifications(x.notification_config);
-  const visibleDevices=currentRole==="operator" ? x.devices.filter(d=>d.alarm_type!=="monitor") : x.devices;
-  $("configGrid").innerHTML=visibleDevices.map(d=>{const monitorOnly=d.alarm_type==="monitor";const headText=monitorOnly?`${d.model||"Logger"} · TEMPERATURE + HUMIDITY MONITOR`:`${d.alarm_type.toUpperCase()} alarm`;const badge=monitorOnly?"MONITOR":(d.effective_mode||"RUNNING");return `<article class="config-card ${(!monitorOnly&&!d.effective_monitoring_enabled)?"config-disabled":""}"><div class="config-head"><div><h3>${d.name}</h3><small>Logger ${d.logger_sn} · ${headText}</small></div><span class="pill ${(!monitorOnly&&!d.effective_monitoring_enabled)?"warn":""}">${badge}</span></div>
-    ${adminControls(d)}${scheduleControls(d)}
-    <div class="config-warning">${monitorOnly?"Temperature and humidity are displayed/logged. Admin can apply calibration offsets; no temperature alarm is configured.":(currentRole==="operator"?"Operator access: schedule changes only.":(!d.monitoring_enabled?"Temperature is still displayed/logged, but alarms are suppressed by NOT IN USE.":"Admin controls are enabled. Calibration offsets affect displayed/logged readings and temperature alarm evaluation."))}</div>
-    <button class="primary" onclick="saveDevice('${d.logger_sn}')">${monitorOnly?"Save Calibration":(currentRole==="admin"?"Save All Settings":"Save Schedule")} — ${d.name}</button><div id="msg-${d.logger_sn}" class="admin-message"></div></article>`;}).join("");
-  visibleDevices.filter(d=>d.alarm_type!=="monitor").forEach(d=>refreshWeek(d.logger_sn));
+  const visibleDevices=can("change_limits") ? x.devices : x.devices.filter(d=>d.alarm_type!=="monitor");
+  $("configGrid").innerHTML=visibleDevices.map(d=>{
+    const monitorOnly=d.alarm_type==="monitor";
+    const headText=monitorOnly?`${d.model||"Logger"} · temperature + humidity monitor`:`${d.alarm_type.toUpperCase()} alarm · limit ${Number(d.limit).toFixed(1)} °C`;
+    const badge=monitorOnly?"MONITOR":(d.effective_mode||"RUNNING");
+    const off=!monitorOnly&&!d.effective_monitoring_enabled;
+    const canSave=monitorOnly?can("change_limits"):(can("change_limits")||can("change_schedule"));
+    const saveText=monitorOnly?"Save Calibration":(can("change_limits")?"Save All Settings":"Save Schedule");
+    const note=monitorOnly?"Temperature and humidity are displayed/logged; no temperature alarm is configured."
+      :(!d.monitoring_enabled?"Temperature is still displayed/logged, but alarms are suppressed by NOT IN USE."
+      :(can("change_limits")?"Calibration offsets affect displayed/logged readings and temperature alarm evaluation.":""));
+    return `<details class="config-card fold-card ${off?"config-disabled":""}" data-fold="logger-${d.logger_sn}">
+      <summary class="config-head"><div><h3>${escapeHtml(d.name)}</h3><small>Logger ${d.logger_sn} · ${headText}${monitorOnly?"":` · ${escapeHtml(d.schedule_enabled?d.schedule_summary||"scheduled":"scheduler OFF")}`}</small></div><span class="pill ${off?"warn":""}">${badge}</span></summary>
+      <div class="fold-body">${adminControls(d)}${scheduleControls(d)}
+      ${note?`<div class="config-warning">${note}</div>`:""}
+      ${canSave?`<button class="primary" onclick="saveDevice('${d.logger_sn}')">${saveText} — ${escapeHtml(d.name)}</button>`:""}<div id="msg-${d.logger_sn}" class="admin-message"></div></div></details>`;}).join("");
+  visibleDevices.filter(d=>d.alarm_type!=="monitor").forEach(d=>{
+    refreshWeek(d.logger_sn);
+    if(!can("change_schedule"))document.querySelectorAll(`#week-${d.logger_sn} input, #schedule-enabled-${d.logger_sn}`).forEach(el=>el.disabled=true);
+  });
+  document.querySelectorAll(".week-tools button").forEach(b=>b.disabled=!can("change_schedule"));
+  initFolds($("configGrid"));
 }
 
 async function saveDevice(sn){
@@ -177,7 +215,7 @@ async function saveDevice(sn){
   const msg=$("msg-"+sn);
   const payload={};
 
-  if(!monitorOnly){
+  if(!monitorOnly&&can("change_schedule")){
     const schedule_enabled=$("schedule-enabled-"+sn).value==="on";
     const schedule_week=readWeek(sn);
     const problem=weekProblem(schedule_week);
@@ -186,7 +224,7 @@ async function saveDevice(sn){
     Object.assign(payload,{schedule_enabled,schedule_week});
   }
 
-  if(currentRole==="admin"){
+  if(can("change_limits")){
     if(!monitorOnly){payload.limit=Number($("limit-"+sn).value);payload.monitoring_enabled=$("mode-"+sn).value==="running";}
     payload.temperature_offset=Number($("temp-offset-"+sn).value);
     payload.humidity_offset=Number($("rh-offset-"+sn).value);
@@ -208,26 +246,73 @@ async function changePassword(){
   if(new_username.length>64){msg.innerHTML='<span class="bad">Admin username must be 64 characters or fewer.</span>';return;}
   if(/[\r\n]/.test(new_username)){msg.innerHTML='<span class="bad">Admin username cannot contain line breaks.</span>';return;}
   if(!current_password||!new_password||!confirm_password){msg.innerHTML='<span class="bad">Complete all Admin password fields.</span>';return;}
-  if(!/^[A-Za-z0-9]{6}$/.test(new_password)){msg.innerHTML='<span class="bad">New Admin password must be exactly 6 letters or numbers.</span>';return;}
+  if(new_password.length<6){msg.innerHTML='<span class="bad">New Admin password must be at least 6 characters.</span>';return;}
   if(new_password!==confirm_password){msg.innerHTML='<span class="bad">New Admin passwords do not match.</span>';return;}
   const r=await fetch("/api/admin/change-password",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({new_username,current_password,new_password,confirm_password})});
   const x=await r.json().catch(()=>({}));
   if(!r.ok){msg.innerHTML='<span class="bad">'+(x.detail||"Admin login change failed")+'</span>';return;}
   $("currentPassword").value=$("newPassword").value=$("confirmPassword").value="";
   if($("adminUsernameEdit"))$("adminUsernameEdit").value=x.username||new_username;
+  $("adminSignedIn").textContent=x.username||new_username;
   msg.innerHTML='<span class="good">Admin username/password updated successfully.</span>';
 }
 
-async function setOperatorPassword(){
-  const msg=$("operatorPasswordMsg"),username=$("operatorUsername").value.trim()||"operator",new_password=$("operatorPassword").value,confirm_password=$("operatorConfirm").value;
-  if(!username){msg.innerHTML='<span class="bad">Enter an Operator username.</span>';return;}
-  if(username.length>64||/[\\r\\n]/.test(username)){msg.innerHTML='<span class="bad">Operator username must be 1-64 printable characters without line breaks.</span>';return;}
-  if(!new_password||!confirm_password){msg.innerHTML='<span class="bad">Enter and confirm the Operator password.</span>';return;}
-  if(!/^[A-Za-z0-9]{6}$/.test(new_password)){msg.innerHTML='<span class="bad">Operator password must be exactly 6 letters or numbers.</span>';return;}
-  if(new_password!==confirm_password){msg.innerHTML='<span class="bad">Operator passwords do not match.</span>';return;}
-  const r=await fetch("/api/admin/operator-password",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({username,new_password,confirm_password})});
-  const x=await r.json().catch(()=>({}));if(!r.ok){msg.innerHTML='<span class="bad">'+(x.detail||"Unable to save Operator login")+'</span>';return;}
-  $("operatorPassword").value=$("operatorConfirm").value="";msg.innerHTML='<span class="good">Operator login saved. Username: '+x.username+'</span>';
+// ---- user logins + rights for each role (Admin only) ----
+const ROLE_NAMES={engineering:"Engineering",operator:"Operator",guest:"Guest"};
+let rightsData=null;
+async function loadUsers(){
+  const r=await fetch("/api/admin/users",{cache:"no-store"});
+  if(!r.ok)return;
+  renderUsers(await r.json());
+}
+function renderUsers(x){
+  rightsData=x;
+  const users=x.users||[];
+  $("userCount").textContent=users.length?`${users.length} login${users.length===1?"":"s"}:`:"No user logins yet.";
+  $("userList").innerHTML=users.map(u=>`<div class="user-row"><span class="user-role role-${u.role}">${ROLE_NAMES[u.role]||u.role}</span>
+    <span class="user-name">${escapeHtml(u.username)}</span>
+    <button type="button" class="danger-outline small" data-user="${escapeHtml(u.username)}" onclick="removeUser(this.dataset.user)">Remove</button></div>`).join("");
+  $("rightsRows").innerHTML=(x.rights||[]).map(rt=>`<tr><td>${escapeHtml(rt.label)}</td>
+    <td><input type="checkbox" checked disabled aria-label="Admin"></td>
+    ${(x.roles||[]).map(role=>`<td><input type="checkbox" class="right-box" data-role="${role}" data-right="${rt.key}" ${(x.role_rights[role]||[]).includes(rt.key)?"checked":""} aria-label="${ROLE_NAMES[role]}"></td>`).join("")}</tr>`).join("")
+    +`<tr class="rights-fixed"><td>Accounts, passwords and role rights</td><td><input type="checkbox" checked disabled></td><td><input type="checkbox" disabled></td><td><input type="checkbox" disabled></td><td><input type="checkbox" disabled></td></tr>`;
+}
+async function postJson(url,body){
+  const r=await fetch(url,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
+  const x=await r.json().catch(()=>({}));
+  return {ok:r.ok,x};
+}
+async function saveUser(){
+  const msg=$("userMsg"),username=$("newUserName").value.trim(),role=$("newUserRole").value,password=$("newUserPass").value,confirm_password=$("newUserConfirm").value;
+  if(!username){msg.innerHTML='<span class="bad">Enter a username.</span>';return;}
+  if(password.length<4){msg.innerHTML='<span class="bad">Password must be at least 4 characters.</span>';return;}
+  if(password!==confirm_password){msg.innerHTML='<span class="bad">Passwords do not match.</span>';return;}
+  const exists=(rightsData?.users||[]).some(u=>u.username.toLowerCase()===username.toLowerCase());
+  const {ok,x}=await postJson("/api/admin/users",{username,role,password,confirm_password});
+  if(!ok){msg.innerHTML='<span class="bad">'+escapeHtml(x.detail||"Unable to save login")+'</span>';return;}
+  $("newUserName").value=$("newUserPass").value=$("newUserConfirm").value="";
+  renderUsers(x);
+  msg.innerHTML=`<span class="good">${exists?"Reset":"Added"} ${escapeHtml(username)} as ${ROLE_NAMES[role]}.</span>`;
+}
+async function removeUser(username){
+  if(!confirm(`Remove the login "${username}"? They are signed out at once.`))return;
+  const {ok,x}=await postJson("/api/admin/users/remove",{username});
+  if(!ok){$("userMsg").innerHTML='<span class="bad">'+escapeHtml(x.detail||"Unable to remove")+'</span>';return;}
+  renderUsers(x); $("userMsg").innerHTML=`<span class="good">Removed ${escapeHtml(username)}.</span>`;
+}
+async function removeRole(role){
+  if(!confirm(`Turn off ALL ${ROLE_NAMES[role]} logins? Each one is removed and signed out.`))return;
+  const {ok,x}=await postJson("/api/admin/users/remove-role",{role});
+  if(!ok){$("userMsg").innerHTML='<span class="bad">'+escapeHtml(x.detail||"Unable to remove")+'</span>';return;}
+  renderUsers(x); $("userMsg").innerHTML=`<span class="good">Removed ${x.removed.length} ${ROLE_NAMES[role]} login(s).</span>`;
+}
+async function saveRights(){
+  const role_rights={};
+  (rightsData?.roles||[]).forEach(role=>role_rights[role]=[]);
+  document.querySelectorAll(".right-box").forEach(b=>{if(b.checked)role_rights[b.dataset.role].push(b.dataset.right);});
+  const {ok,x}=await postJson("/api/admin/role-rights",{role_rights});
+  if(!ok){$("rightsMsg").innerHTML='<span class="bad">'+escapeHtml(x.detail||"Unable to save rights")+'</span>';return;}
+  renderUsers(x); $("rightsMsg").innerHTML='<span class="good">Rights saved. They apply on each person\'s next action.</span>';
 }
 
 
@@ -308,4 +393,5 @@ async function testNotification(kind){
   msg.innerHTML=`<span class="${failed?"warn":"good"}">Test sent to ${x.sent} recipient(s)${failed}.</span>`;
 }
 
+initFolds();
 status();

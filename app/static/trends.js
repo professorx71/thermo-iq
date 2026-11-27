@@ -1,5 +1,7 @@
 
 let minutes=1440,useF=false,lastData=null;
+// Which logger is shown: "ALL" or a serial. Kept in the address (#serial) so a link opens that logger.
+let selected=decodeURIComponent(location.hash.slice(1))||localStorage.getItem("thermoiq.trends.logger")||"ALL";
 const $=id=>document.getElementById(id),cv=c=>useF?(c*9/5+32):c,unit=()=>useF?"°F":"°C";
 function rangeLabel(){
   if(minutes===60)return "1 Hour";
@@ -63,10 +65,30 @@ function downloadCalendarHistory(){
 }
 function toggleUnit(){useF=!useF;load()}
 document.querySelectorAll("[data-min]").forEach(b=>b.onclick=()=>{minutes=Number(b.dataset.min);document.querySelectorAll("[data-min]").forEach(x=>x.classList.toggle("primary",x===b));updateDownloadLabels();load()});
-async function load(){try{let r=await fetch("/api/current");lastData=await r.json();$("conn").innerHTML='<span class="good">● LI-COR CONNECTED</span>';populateHistoryLogger();renderCards();await Promise.all(lastData.devices.map(loadOne))}catch(e){$("conn").innerHTML='<span class="bad">● CONNECTION ERROR</span>'}}
+async function load(){try{let r=await fetch("/api/current");lastData=await r.json();$("conn").innerHTML='<span class="good">● LI-COR CONNECTED</span>';populateHistoryLogger();if(selected!=="ALL"&&!lastData.devices.some(d=>d.logger_sn===selected))selected="ALL";renderChips();renderCards();await Promise.all(shownDevices().map(loadOne))}catch(e){$("conn").innerHTML='<span class="bad">● CONNECTION ERROR</span>'}}
 function safeNum(v,digits=1){const n=Number(v);return Number.isFinite(n)?n.toFixed(digits):"--"}
+function shownDevices(){return selected==="ALL"?lastData.devices:lastData.devices.filter(d=>d.logger_sn===selected);}
+function chipState(d){
+  if(d.comm_status&&d.comm_status!=="ONLINE")return "stale";
+  if(d.alarm_type==="monitor")return "monitor";
+  return d.alarm?"alarm":"ok";
+}
+function renderChips(){
+  const all=`<button type="button" class="logger-chip ${selected==="ALL"?"active":""}" onclick="pickLogger('ALL')"><b>All loggers</b><small>${lastData.devices.length} loggers</small></button>`;
+  $("loggerChips").innerHTML=all+lastData.devices.map(d=>{
+    const t=Number(d.temperature);
+    return `<button type="button" class="logger-chip chip-${chipState(d)} ${selected===d.logger_sn?"active":""}" onclick="pickLogger('${d.logger_sn}')">
+      <b>${d.name}</b><small>${Number.isFinite(t)?cv(t).toFixed(1)+" "+unit():"--"}${d.alarm?" · ALARM":""}</small></button>`;}).join("");
+}
+function pickLogger(sn){
+  selected=sn; localStorage.setItem("thermoiq.trends.logger",sn);
+  history.replaceState(null,"",sn==="ALL"?location.pathname:"#"+encodeURIComponent(sn));
+  const sel=$("historyLogger"); if(sel&&[...sel.options].some(o=>o.value===sn))sel.value=sn;
+  renderChips();renderCards();Promise.all(shownDevices().map(loadOne));
+}
 function renderCards(){
-  $("trendGrid").innerHTML=lastData.devices.map(d=>{
+  $("trendGrid").classList.toggle("single",selected!=="ALL");
+  $("trendGrid").innerHTML=shownDevices().map(d=>{
     const monitorOnly=d.alarm_type==="monitor";
     const temp=Number(d.temperature), rh=Number(d.rh);
     const tempText=Number.isFinite(temp)?cv(temp).toFixed(1):"--";
@@ -87,7 +109,7 @@ async function loadOne(d){
 }
 function draw(c,pts,limit,kind){
   if(!c||!pts.length)return;
-  let ctx=c.getContext("2d"),w=c.clientWidth,h=210,dp=devicePixelRatio||1;c.width=w*dp;c.height=h*dp;ctx.scale(dp,dp);ctx.clearRect(0,0,w,h);
+  let ctx=c.getContext("2d"),w=c.clientWidth,h=selected==="ALL"?210:340,dp=devicePixelRatio||1;c.width=w*dp;c.height=h*dp;ctx.scale(dp,dp);ctx.clearRect(0,0,w,h);
   let vals=pts.map(p=>p.v).filter(Number.isFinite);if(!vals.length)return;
   let mn,mx;
   if(kind==="rh"){mn=Math.max(0,Math.min(...vals)-5);mx=Math.min(100,Math.max(...vals)+5);}
@@ -99,6 +121,7 @@ function draw(c,pts,limit,kind){
   ctx.strokeStyle=kind==="rh"?"#8f7bff":"#3ab5ff";ctx.lineWidth=2.7;ctx.beginPath();pts.forEach((q,i)=>{let xx=p.l+i/Math.max(1,pts.length-1)*cw,yy=p.t+ch-(q.v-mn)/(mx-mn)*ch;i?ctx.lineTo(xx,yy):ctx.moveTo(xx,yy)});ctx.stroke();
   if(kind==="temp"&&limit!=null&&Number.isFinite(limit)){let y=p.t+ch-(limit-mn)/(mx-mn)*ch;ctx.setLineDash([6,4]);ctx.strokeStyle="#ff5d67";ctx.beginPath();ctx.moveTo(p.l,y);ctx.lineTo(w-p.r,y);ctx.stroke();ctx.setLineDash([])}
 }
+window.addEventListener("hashchange",()=>{const sn=decodeURIComponent(location.hash.slice(1))||"ALL";if(sn!==selected&&lastData)pickLogger(sn);});
 initializeHistoryCalendar();
 updateDownloadLabels();
 load();

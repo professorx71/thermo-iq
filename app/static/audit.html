@@ -4,14 +4,14 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>ThermoIQ · CMS Audit Controls</title>
-<link rel="icon" type="image/svg+xml" href="/static/thermoiq-mark.svg"><link rel="stylesheet" href="/static/style.css?v=6.2.9">
+<link rel="icon" type="image/svg+xml" href="/static/thermoiq-mark.svg"><link rel="stylesheet" href="/static/style.css?v=6.3.0">
 </head>
 <body>
 <header class="topbar">
   <div class="brand">
     <img class="brand-logo" src="/static/thermoiq-mark.svg" alt="ThermoIQ">
     <div><div class="wordmark">Thermo<span class="iq">IQ</span><small>PBF Rise Baking Burnaby</small></div><h1>CMS Audit Controls</h1>
-      <p>Calibration · audit trail · deviations · retention · backup · read-only PDF · v6.2.9</p></div>
+      <p>Calibration · audit trail · deviations · retention · backup · read-only PDF · v6.3.0</p></div>
   </div>
   <nav><a href="/">Dashboard</a><a href="/trends">Trends</a><a href="/events">Events</a><a class="active" href="/audit">Audit</a><a href="/settings">Settings</a></nav>
 </header>
@@ -20,7 +20,7 @@
   <section class="section-head">
     <div><span class="eyebrow">AUDIT-SUPPORTING CONTROLS</span><h2>Environmental Monitoring Records</h2>
       <p>Supports maintenance, QA and food-safety record review. This dashboard does not by itself certify compliance with a specific audit scheme.</p></div>
-    <div class="actions"><a class="button-link" href="/api/audit-trail.csv">Download Audit Trail CSV</a><button onclick="loadAll()">Refresh</button></div>
+    <div class="actions"><a class="button-link" href="/api/audit-trail.csv">Download Audit Trail CSV</a><button onclick="loadAll()">Refresh</button><button type="button" onclick="setAllFolds(false)">Hide all</button><button type="button" onclick="setAllFolds(true)">Show all</button></div>
   </section>
 
   <section class="audit-status-grid">
@@ -30,20 +30,21 @@
     <article class="hero-card"><span>Current access</span><strong id="auditRole">READ-ONLY</strong><small id="auditUser">Login in Settings to edit</small></article>
   </section>
 
-  <section class="panel audit-panel">
-    <div class="section-head compact"><div><span class="eyebrow">READ-ONLY RECORD</span><h2>Audit PDF Report</h2>
-      <p>Select a logger and calendar date. The report includes daily min/max/average, alarm count, downtime, calibration reference, acknowledgement, and corrective action.</p></div></div>
+  <details class="fold" data-fold="audit-pdf" open>
+    <summary><span>Audit PDF Report</span></summary>
+    <div class="fold-body"><p class="fold-help">Select a logger and calendar date. The report includes daily min/max/average, alarm count, downtime, calibration reference, acknowledgement, and corrective action.</p>
     <div class="audit-form-grid three">
       <label>Logger<select id="reportLogger"><option value="ALL">All Loggers</option></select></label>
       <label>Calendar Date<input id="reportDate" type="date"></label>
       <button class="primary" onclick="downloadAuditReport()">Download Modification-Restricted PDF</button>
     </div>
     <div class="admin-note"><b>Record integrity:</b> each PDF contains a SHA-256 hash of the underlying report dataset. PDF modification is restricted; this is not a cryptographic digital signature.</div>
-  </section>
+    </div>
+  </details>
 
-  <section class="panel audit-panel">
-    <div class="section-head compact"><div><span class="eyebrow">ADMIN</span><h2>Calibration Record</h2>
-      <p>Document reference instrument, offsets, calibration date, next due date and technician. Saving the record applies the documented offsets to the live logger.</p></div></div>
+  <details class="fold" data-fold="audit-calibration">
+    <summary><span>Calibration Record</span></summary>
+    <div class="fold-body"><p class="fold-help">Document reference instrument, offsets, calibration date, next due date and technician. Saving the record applies the documented offsets to the live logger.</p>
     <div class="audit-form-grid">
       <label>Logger<select id="calLogger"></select></label>
       <label>Calibration Date<input id="calDate" type="date"></label>
@@ -59,11 +60,12 @@
     </div>
     <div id="calMsg" class="admin-message"></div>
     <div class="tablewrap audit-table"><table><thead><tr><th>Date</th><th>Logger</th><th>Temp Offset</th><th>RH Offset</th><th>Reference</th><th>Certificate</th><th>Next Due</th><th>Performed By</th></tr></thead><tbody id="calibrationRows"></tbody></table></div>
-  </section>
+    </div>
+  </details>
 
-  <section class="panel audit-panel">
-    <div class="section-head compact"><div><span class="eyebrow">ADMIN / OPERATOR</span><h2>Alarm Deviation & Corrective Action</h2>
-      <p>Attach maintenance/QA action to a recorded temperature alarm episode so the audit report shows what happened and what was done.</p></div></div>
+  <details class="fold" data-fold="audit-deviation">
+    <summary><span>Alarm Deviation & Corrective Action</span></summary>
+    <div class="fold-body"><p class="fold-help">Attach maintenance/QA action to a recorded temperature alarm episode so the audit report shows what happened and what was done.</p>
     <div class="audit-form-grid">
       <label class="wide">Alarm Episode<select id="devEpisode"></select></label>
       <label>Status<select id="devStatus"><option>OPEN</option><option>CLOSED</option></select></label>
@@ -78,11 +80,12 @@
       <button id="saveDeviationBtn" class="primary wide" onclick="saveDeviation()">Save Deviation / Corrective Action</button>
     </div>
     <div id="devMsg" class="admin-message"></div>
-  </section>
+    </div>
+  </details>
 
-  <section class="panel audit-panel">
-    <div class="section-head compact"><div><span class="eyebrow">ADMIN</span><h2>Retention & Backup</h2>
-      <p>Local audit, alarm and downtime records can be retained for 1–3 years. Automated backups contain data/configuration JSON only; secret credentials in .env are intentionally excluded.</p></div></div>
+  <details class="fold" data-fold="audit-backup">
+    <summary><span>Retention & Backup</span></summary>
+    <div class="fold-body"><p class="fold-help">Local audit, alarm and downtime records can be retained for 1–3 years. Automated backups contain data/configuration JSON only; secret credentials in .env are intentionally excluded.</p>
     <div class="audit-form-grid">
       <label>Retention<select id="retentionYears"><option value="1">1 Year</option><option value="2">2 Years</option><option value="3">3 Years</option></select></label>
       <label>Automatic Backup<select id="backupEnabled"><option value="true">ENABLED</option><option value="false">DISABLED</option></select></label>
@@ -94,15 +97,28 @@
     </div>
     <div id="backupMsg" class="admin-message"></div>
     <div class="admin-note"><b>Recovery:</b> the backup ZIP contains alarm events, acknowledgement state, logger settings, downtime history, calibration records, deviations, audit trail and report settings. Keep a separate protected backup of the server .env credentials.</div>
-  </section>
+    </div>
+  </details>
 
-  <section class="panel audit-panel">
-    <div class="section-head compact"><div><span class="eyebrow">AUDIT TRAIL</span><h2>Recent Configuration & Alarm Activity</h2>
-      <p>Login/logout, alarms, acknowledgements, configuration changes, calibration records, corrective actions, report activity and backups.</p></div></div>
+  <details class="fold" data-fold="audit-trail" open>
+    <summary><span>Audit trail log — configuration, alarm and login activity</span></summary>
+    <div class="fold-body"><p class="fold-help">Login/logout, alarms, acknowledgements, configuration changes, calibration records, corrective actions, report activity and backups.</p>
+    <div class="log-filters">
+      <label>Show<select id="trailPeriod" onchange="trailPeriodChanged()">
+        <option value="today">Today</option><option value="1">Last 24 hours</option><option value="7" selected>Last 7 days</option>
+        <option value="30">Last 30 days</option><option value="90">Last 3 months</option><option value="365">Last 12 months</option>
+        <option value="day">Pick a day…</option><option value="all">Everything</option></select></label>
+      <label id="trailDateWrap" class="hidden">Day<input id="trailDate" type="date" onchange="loadAuditTrail()"></label>
+      <label>Logger<select id="trailLogger" onchange="loadAuditTrail()"><option value="">All</option></select></label>
+      <label>Category<select id="trailCategory" onchange="loadAuditTrail()"><option value="">All categories</option></select></label>
+      <button type="button" onclick="loadAuditTrail()">Refresh</button>
+      <span class="log-count" id="trailCount"></span>
+    </div>
     <div class="tablewrap audit-table"><table><thead><tr><th>Pacific Time</th><th>Category</th><th>Action</th><th>Actor</th><th>Logger</th><th>Detail</th></tr></thead><tbody id="auditRows"></tbody></table></div>
-  </section>
+    </div>
+  </details>
 </main>
-<footer>PBF Rise Baking Burnaby · CMS Audit-Supporting Controls · v6.2.9</footer>
-<script src="/static/audit.js?v=6.2.9"></script>
+<footer>PBF Rise Baking Burnaby · CMS Audit-Supporting Controls · v6.3.0</footer>
+<script src="/static/fold.js?v=6.3.0"></script><script src="/static/audit.js?v=6.3.0"></script>
 </body>
 </html>

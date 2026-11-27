@@ -1,14 +1,30 @@
 <!doctype html>
 <html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>ThermoIQ · Alarm Events</title><link rel="icon" type="image/svg+xml" href="/static/thermoiq-mark.svg"><link rel="stylesheet" href="/static/style.css?v=6.2.9"></head>
-<body><header class="topbar"><div class="brand"><img class="brand-logo" src="/static/thermoiq-mark.svg" alt="ThermoIQ"><div><div class="wordmark">Thermo<span class="iq">IQ</span><small>PBF Rise Baking Burnaby</small></div><h1>Alarm & Event History</h1><p>Persistent server-side log · v6.2.9</p></div></div>
+<title>ThermoIQ · Alarm Events</title><link rel="icon" type="image/svg+xml" href="/static/thermoiq-mark.svg"><link rel="stylesheet" href="/static/style.css?v=6.3.0"></head>
+<body><header class="topbar"><div class="brand"><img class="brand-logo" src="/static/thermoiq-mark.svg" alt="ThermoIQ"><div><div class="wordmark">Thermo<span class="iq">IQ</span><small>PBF Rise Baking Burnaby</small></div><h1>Alarm & Event History</h1><p>Persistent server-side log · v6.3.0</p></div></div>
 <nav><a href="/">Dashboard</a><a href="/trends">Trends</a><a class="active" href="/events">Events</a><a href="/audit">Audit</a><a href="/settings">Settings</a></nav></header>
 <main><section class="section-head"><div><span class="eyebrow">AUDIT TRAIL</span><h2>Alarm Event Log</h2><p>Alarm, acknowledgement, reminder, notification and recovery history. Maintenance CSV reports open directly in Excel and include daily event count and downtime by logger.</p></div>
-<div class="actions"><button onclick="loadEvents()">Refresh</button>
+<div class="actions"><button type="button" onclick="setAllFolds(false)">Hide all</button><button type="button" onclick="setAllFolds(true)">Show all</button></div></section>
+<details class="fold" data-fold="events-log" open><summary>Alarm event log</summary><div class="fold-body">
+<div class="log-filters">
+  <label>Show<select id="evPeriod" onchange="periodChanged()">
+    <option value="1">Last 24 hours</option><option value="today">Today</option><option value="7" selected>Last 7 days</option>
+    <option value="30">Last 30 days</option><option value="90">Last 3 months</option><option value="365">Last 12 months</option>
+    <option value="day">Pick a day…</option><option value="all">Everything</option></select></label>
+  <label id="evDateWrap" class="hidden">Day<input id="evDate" type="date" onchange="loadEvents()"></label>
+  <label>Logger<select id="evLogger" onchange="loadEvents()"><option value="">All loggers</option></select></label>
+  <label>Event<select id="evKind" onchange="renderEvents()"><option value="">All events</option><option value="ALARM">Alarms only</option><option value="ACK">Acknowledgements</option><option value="NORMAL">Return to normal</option><option value="CHANGE">Setting changes</option><option value="LOGIN">Logins</option></select></label>
+  <button type="button" onclick="loadEvents()">Refresh</button>
+  <span class="log-count" id="evCount"></span>
+</div>
+<div class="tablewrap"><table><thead><tr><th>Time</th><th>Logger</th><th>Event</th><th>Reading</th><th>Limit</th><th>Email</th><th>Text Message</th></tr></thead><tbody id="alarmLog"></tbody></table></div>
+</div></details>
+<details class="fold" data-fold="events-downloads"><summary>Downloads — Excel / CSV reports</summary><div class="fold-body"><div class="actions">
 <a class="button-link" href="/api/maintenance-report.csv?hours=24">Download 24H Downtime CSV</a>
 <a class="button-link" href="/api/maintenance-report.csv?hours=720">Download 30-Day Downtime CSV</a>
+<a class="button-link" href="/api/temperature-history-all.xlsx?hours=24">Download 24H Temperature Excel (one sheet per logger)</a>
 <a class="button-link" href="/api/temperature-history-all.csv?hours=24">Download 24H Temperature CSV</a>
-<a class="button-link" href="/audit">Audit Controls & Reports</a></div></section>
-<section class="panel"><div class="tablewrap"><table><thead><tr><th>Time</th><th>Logger</th><th>Event</th><th>Reading</th><th>Limit</th><th>Email</th><th>Text Message</th></tr></thead><tbody id="alarmLog"></tbody></table></div></section></main>
+<a class="button-link" href="/audit">Audit Controls & Reports</a></div></div></details>
+</main>
 <footer>Audit retention policy protects alarm/event history from dashboard deletion.</footer>
-<script src="/static/events.js?v=6.2.9"></script></body></html>
+<script src="/static/fold.js?v=6.3.0"></script><script src="/static/events.js?v=6.3.0"></script></body></html>

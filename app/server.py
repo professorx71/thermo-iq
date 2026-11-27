@@ -190,7 +190,15 @@ def _session_info(request: Request):
         if not expiry or expiry < datetime.now(timezone.utc):
             admin_sessions.pop(token,None)
             return None
-        return dict(item)
+        info=dict(item)
+    if info.get("role")!="admin":
+        # A removed user is signed out at once; a changed role applies on the next request.
+        user=find_user(info.get("username",""))
+        if not user:
+            with admin_lock: admin_sessions.pop(token,None)
+            return None
+        info["role"]=user["role"]
+    return info
 
 def _admin_user(request: Request):
     info=_session_info(request)
@@ -202,11 +210,102 @@ def require_admin(request: Request):
         raise HTTPException(status_code=403 if info else 401,detail="Administrator login required")
     return info
 
-def require_settings_access(request: Request):
+# ---------------------------------------------------------------- user logins + role rights
+# Admin stays in .env. Engineering / Operator / Guest logins live in data/users.json
+# (PBKDF2 hashes only). What each role may do is set by the Admin in data/role_rights.json.
+USERS_FILE=DATA_DIR/"users.json"
+RIGHTS_FILE=DATA_DIR/"role_rights.json"
+USER_ROLES=("engineering","operator","guest")
+RIGHTS=[
+    ("view_settings","View settings (read only)"),
+    ("change_schedule","Change the alarm notification schedule"),
+    ("change_limits","Change alarm limits, equipment mode and calibration offsets"),
+    ("edit_deviations","Record deviations and corrective actions (Audit)"),
+    ("edit_calibration","Save calibration records (Audit)"),
+    ("change_notifications","Change email / text recipients and email reports"),
+    ("manage_backups","Change retention and backups, download backups"),
+]
+RIGHT_KEYS={k for k,_ in RIGHTS}
+DEFAULT_RIGHTS={
+    "engineering":["view_settings","change_schedule","change_limits","edit_deviations","edit_calibration"],
+    "operator":["view_settings","change_schedule","edit_deviations"],   # same as the old Operator login
+    "guest":["view_settings"],
+}
+users_lock=threading.RLock()
+MIN_ADMIN_PASSWORD=6
+MIN_USER_PASSWORD=4
+
+def load_users():
+    with users_lock:
+        if not USERS_FILE.exists():
+            # First run: carry over the single Operator login from .env.
+            seed=[]
+            if OPERATOR_PASSWORD_HASH:
+                seed.append({"username":OPERATOR_USERNAME,"role":"operator","hash":OPERATOR_PASSWORD_HASH,
+                             "updated_utc":datetime.now(timezone.utc).isoformat(),"updated_by":"migrated from .env"})
+            _write_json(USERS_FILE,seed)
+            return [dict(u) for u in seed]
+        rows=_read_json(USERS_FILE,[])
+        return [dict(u) for u in rows if isinstance(u,dict) and u.get("username") and u.get("role") in USER_ROLES]
+
+def save_users(users):
+    with users_lock:
+        _write_json(USERS_FILE,users)
+        try: os.chmod(USERS_FILE,0o600)
+        except OSError: pass
+
+def find_user(username):
+    for u in load_users():
+        if hmac.compare_digest(u["username"].casefold(),str(username).casefold()):
+            return u
+    return None
+
+def load_role_rights():
+    saved=_read_json(RIGHTS_FILE,{})
+    out={}
+    for role in USER_ROLES:
+        vals=saved.get(role) if isinstance(saved,dict) else None
+        out[role]=[k for k,_ in RIGHTS if k in (vals if isinstance(vals,list) else DEFAULT_RIGHTS[role])]
+    return out
+
+def role_rights(role):
+    if role=="admin":
+        return [k for k,_ in RIGHTS]
+    return load_role_rights().get(role,[])
+
+def role_has(role,right):
+    return right in role_rights(role)
+
+def require_right(request: Request, right: str):
     info=_session_info(request)
-    if not info or info.get("role") not in ("admin","operator"):
-        raise HTTPException(status_code=401,detail="Admin or operator login required")
+    if not info:
+        raise HTTPException(status_code=401,detail="Login required")
+    if not role_has(info.get("role"),right):
+        label=dict(RIGHTS).get(right,right)
+        raise HTTPException(status_code=403,detail=f"Your login ({info.get('role')}) is not allowed to: {label}")
     return info
+
+def require_settings_access(request: Request):
+    return require_right(request,"view_settings")
+
+def _drop_sessions(match):
+    with admin_lock:
+        for token,item in list(admin_sessions.items()):
+            if isinstance(item,dict) and match(item):
+                admin_sessions.pop(token,None)
+
+# Sign-in lockout: 10 wrong passwords from one address within 15 minutes locks it for 15 minutes.
+LOGIN_FAIL_LIMIT=10
+LOGIN_WINDOW=timedelta(minutes=15)
+login_failures={}
+login_locked_until={}
+
+def _client_ip(request: Request):
+    host=request.client.host if request.client else ""
+    if host in ("127.0.0.1","::1",""):
+        fwd=request.headers.get("x-forwarded-for","").split(",")[0].strip()
+        if fwd: return fwd
+    return host or "unknown"
 
 def load_alarm_config():
     """Persistent operator settings. Defaults are defined in LOGGERS."""
@@ -598,6 +697,8 @@ def get_audit_records(limit=1000):
             "source_event_id":e.get("id",""),
         })
     rows=sorted(rows,key=lambda r:str(r.get("time_utc","")))
+    if limit is None:
+        return rows
     return rows[-max(1,min(int(limit),5000)):]
 
 def load_calibration_records():
@@ -757,7 +858,7 @@ def create_audit_backup(reason="scheduled",actor="SYSTEM"):
         "created_utc":now.isoformat(),
         "created_pacific":now.astimezone(PLANT_TZ).isoformat(),
         "timezone":"America/Vancouver",
-        "version":"6.2.9",
+        "version":"6.3.0",
         "reason":reason,
         "actor":actor,
         "note":"Data/config backup only. Secrets in .env are intentionally excluded.",
@@ -863,7 +964,7 @@ async def build_audit_pdf(sn,date_text):
     deviations={str(r.get("episode_id")):r for r in load_deviations()}
 
     dataset={
-        "version":"6.2.9",
+        "version":"6.3.0",
         "date":selected.isoformat(),
         "timezone":"America/Vancouver",
         "logger_serials":serials,
@@ -1553,12 +1654,12 @@ LOGGERS={
 "22547310":{"id":"BP2","name":"Bagel Proofer 2","alarm_type":"low","limit":30.0},
 "22212731":{"id":"PLANT","name":"PBF Plant Temperature","model":"MX1101","alarm_type":"monitor","limit":0.0}}
 
-app=FastAPI(title="ThermoIQ - PBF Burnaby Temperature Dashboard v6.2.9 Cloud Edition")
+app=FastAPI(title="ThermoIQ - PBF Burnaby Temperature Dashboard v6.3.0 Cloud Edition")
 
 @app.get("/api/deployment-status")
 def api_deployment_status():
     return {
-        "version":"6.2.9",
+        "version":"6.3.0",
         "edition":"OVH Cloud",
         "deployment_role":DEPLOYMENT_ROLE,
         "automatic_notifications_enabled":NOTIFICATIONS_ENABLED,
@@ -1729,7 +1830,7 @@ async def v501_status():
     with event_lock:
         events = _read_json(EVENT_FILE, [])
     return {
-        "version": "6.2.9",
+        "version": "6.3.0",
         "logger_count": len(cur.get("devices", [])),
         "loggers": [{"name": d.get("name"), "logger_sn": d.get("logger_sn"), "comm_status": d.get("comm_status"), "age_minutes": d.get("age_minutes")} for d in cur.get("devices", [])],
         "alarm_event_count": len(events),
@@ -1753,6 +1854,7 @@ def admin_status(request: Request):
         "logged_in": bool(info),
         "username": info.get("username") if info else None,
         "role": info.get("role") if info else None,
+        "rights": role_rights(info.get("role")) if info else [],
         "session_hours": SESSION_HOURS,
     }
 
@@ -1764,21 +1866,36 @@ async def admin_login(request: Request):
         data={}
     username=str(data.get("username","")).strip()
     password=str(data.get("password",""))
+    ip=_client_ip(request)
+    now=datetime.now(timezone.utc)
+    locked=login_locked_until.get(ip)
+    if locked and locked>now:
+        mins=max(1,int((locked-now).total_seconds()//60)+1)
+        raise HTTPException(status_code=429,detail=f"Too many wrong passwords. Sign-in from this place is locked for {mins} more minute(s).")
 
     role=None
     canonical_user=None
+    user=find_user(username) if username else None
     if hmac.compare_digest(username,ADMIN_USERNAME) and _password_ok(password):
         role="admin"; canonical_user=ADMIN_USERNAME
-    elif hmac.compare_digest(username,OPERATOR_USERNAME) and _operator_password_ok(password):
-        role="operator"; canonical_user=OPERATOR_USERNAME
+    elif user and _password_hash_ok(password,user.get("hash","")):
+        role=user["role"]; canonical_user=user["username"]
 
     if not role:
-        add_event("AUTH","Settings","LOGIN FAILED",detail=f"Username: {username or '(blank)'}")
+        fails=[t for t in login_failures.get(ip,[]) if now-t<LOGIN_WINDOW]+[now]
+        login_failures[ip]=fails
+        add_event("AUTH","Settings","LOGIN FAILED",detail=f"Username: {username or '(blank)'} from {ip}",category="ACCESS")
+        if len(fails)>=LOGIN_FAIL_LIMIT:
+            login_locked_until[ip]=now+LOGIN_WINDOW
+            login_failures.pop(ip,None)
+            add_event("AUTH","Settings","LOGIN LOCKED",detail=f"{LOGIN_FAIL_LIMIT} wrong passwords from {ip} within 15 minutes; locked for 15 minutes",category="ACCESS")
+            raise HTTPException(status_code=429,detail="Too many wrong passwords. Sign-in from this place is locked for 15 minutes.")
         raise HTTPException(status_code=401,detail="Invalid username or password")
+    login_failures.pop(ip,None)
 
     token, expiry=_new_session(canonical_user,role)
     add_event("AUTH","Settings",f"{role.upper()} LOGIN",detail=f"User {canonical_user}",actor=canonical_user,role=role,category="ACCESS")
-    resp=JSONResponse({"ok":True,"username":canonical_user,"role":role,"expires":expiry.isoformat()})
+    resp=JSONResponse({"ok":True,"username":canonical_user,"role":role,"rights":role_rights(role),"expires":expiry.isoformat()})
     resp.set_cookie(
         "pbf_admin_session",token,
         max_age=SESSION_HOURS*3600,
@@ -1808,8 +1925,10 @@ async def admin_change_password(request: Request):
         raise HTTPException(status_code=400,detail="Admin username must be 1-64 printable characters; letters, numbers, spaces and symbols are allowed")
     if new_password != confirm_password:
         raise HTTPException(status_code=400,detail="New passwords do not match")
-    if not _valid_settings_password(new_password):
-        raise HTTPException(status_code=400,detail="Admin password must be exactly 6 letters or numbers")
+    if len(new_password)<MIN_ADMIN_PASSWORD or len(new_password)>128:
+        raise HTTPException(status_code=400,detail=f"Admin password must be {MIN_ADMIN_PASSWORD} to 128 characters")
+    if find_user(new_username):
+        raise HTTPException(status_code=400,detail="A user login already has that username")
     if hmac.compare_digest(current_password,new_password) and hmac.compare_digest(new_username,ADMIN_USERNAME):
         raise HTTPException(status_code=400,detail="Change the username or choose a different password")
 
@@ -1829,35 +1948,111 @@ async def admin_change_password(request: Request):
     resp.set_cookie("pbf_admin_session",token,max_age=SESSION_HOURS*3600,httponly=True,samesite="strict",secure=False,path="/")
     return resp
 
-@app.post("/api/admin/operator-password")
-async def admin_set_operator_password(request: Request):
-    global OPERATOR_PASSWORD_HASH, OPERATOR_USERNAME
+def _users_payload():
+    return {"users":[{"username":u["username"],"role":u["role"],"updated_utc":u.get("updated_utc",""),
+                      "updated_by":u.get("updated_by","")} for u in load_users()],
+            "roles":list(USER_ROLES),
+            "rights":[{"key":k,"label":l} for k,l in RIGHTS],
+            "role_rights":load_role_rights(),
+            "min_password":MIN_USER_PASSWORD,"min_admin_password":MIN_ADMIN_PASSWORD}
+
+@app.get("/api/admin/users")
+def admin_list_users(request: Request):
+    require_admin(request)
+    return _users_payload()
+
+@app.post("/api/admin/users")
+async def admin_set_user(request: Request):
+    """Add a user login, or reset an existing user's role and password."""
     info=require_admin(request)
-    try:
-        data=await request.json()
-    except Exception:
-        data={}
-    username=str(data.get("username",OPERATOR_USERNAME)).strip() or "operator"
-    new_password=str(data.get("new_password",""))
-    confirm_password=str(data.get("confirm_password",""))
+    try: data=await request.json()
+    except Exception: data={}
+    username=str(data.get("username","")).strip()
+    role=str(data.get("role","")).strip().lower()
+    password=str(data.get("password",""))
+    confirm=str(data.get("confirm_password",""))
+    if role not in USER_ROLES:
+        raise HTTPException(status_code=400,detail="Choose a role: Engineering, Operator or Guest")
     if not _valid_settings_username(username):
-        raise HTTPException(status_code=400,detail="Operator username must be 1-64 printable characters; letters, numbers, spaces and symbols are allowed")
-    if new_password != confirm_password:
-        raise HTTPException(status_code=400,detail="Operator passwords do not match")
-    if not _valid_settings_password(new_password):
-        raise HTTPException(status_code=400,detail="Operator password must be exactly 6 letters or numbers")
-    new_hash=_make_password_hash(new_password)
-    _update_env_value("OPERATOR_USERNAME",username)
-    _update_env_value("OPERATOR_PASSWORD_HASH",new_hash)
-    OPERATOR_USERNAME=username
-    OPERATOR_PASSWORD_HASH=new_hash
-    # Invalidate existing operator sessions but preserve admin sessions.
-    with admin_lock:
-        for token,item in list(admin_sessions.items()):
-            if isinstance(item,dict) and item.get("role")=="operator":
-                admin_sessions.pop(token,None)
-    add_event("ADMIN","Admin","OPERATOR PASSWORD SET",detail=f"Operator account {username} set/reset by {info['username']}")
-    return {"ok":True,"username":username}
+        raise HTTPException(status_code=400,detail="Username must be 1-64 printable characters")
+    if username.casefold()==ADMIN_USERNAME.casefold():
+        raise HTTPException(status_code=400,detail="That username belongs to the Admin login")
+    if password!=confirm:
+        raise HTTPException(status_code=400,detail="Passwords do not match")
+    if len(password)<MIN_USER_PASSWORD or len(password)>128:
+        raise HTTPException(status_code=400,detail=f"Password must be {MIN_USER_PASSWORD} to 128 characters")
+    now=datetime.now(timezone.utc).isoformat()
+    with users_lock:
+        users=load_users()
+        existing=next((u for u in users if u["username"].casefold()==username.casefold()),None)
+        if existing:
+            old_role=existing["role"]
+            existing.update({"role":role,"hash":_make_password_hash(password),"updated_utc":now,"updated_by":info["username"]})
+            action="USER LOGIN RESET"; name=existing["username"]
+            detail=f"{name}: role {old_role} -> {role}, password reset by {info['username']}"
+        else:
+            users.append({"username":username,"role":role,"hash":_make_password_hash(password),"updated_utc":now,"updated_by":info["username"]})
+            action="USER LOGIN ADDED"; name=username
+            detail=f"{username} added as {role} by {info['username']}"
+        save_users(users)
+    _drop_sessions(lambda item: item.get("role")!="admin" and str(item.get("username","")).casefold()==name.casefold())
+    add_event("ADMIN","Admin",action,detail=detail,actor=info["username"],role="admin",category="ACCESS")
+    return {"ok":True,**_users_payload()}
+
+@app.post("/api/admin/users/remove")
+async def admin_remove_user(request: Request):
+    info=require_admin(request)
+    try: data=await request.json()
+    except Exception: data={}
+    username=str(data.get("username","")).strip()
+    with users_lock:
+        users=load_users()
+        keep=[u for u in users if u["username"].casefold()!=username.casefold()]
+        if len(keep)==len(users):
+            raise HTTPException(status_code=404,detail="No such user login")
+        save_users(keep)
+    _drop_sessions(lambda item: item.get("role")!="admin" and str(item.get("username","")).casefold()==username.casefold())
+    add_event("ADMIN","Admin","USER LOGIN REMOVED",detail=f"{username} removed by {info['username']}",
+              actor=info["username"],role="admin",category="ACCESS")
+    return {"ok":True,**_users_payload()}
+
+@app.post("/api/admin/users/remove-role")
+async def admin_remove_role(request: Request):
+    """Turn off every login of one role (e.g. all Operator logins)."""
+    info=require_admin(request)
+    try: data=await request.json()
+    except Exception: data={}
+    role=str(data.get("role","")).strip().lower()
+    if role not in USER_ROLES:
+        raise HTTPException(status_code=400,detail="Unknown role")
+    with users_lock:
+        users=load_users()
+        gone=[u["username"] for u in users if u["role"]==role]
+        save_users([u for u in users if u["role"]!=role])
+    _drop_sessions(lambda item: item.get("role")==role)
+    add_event("ADMIN","Admin","USER LOGINS REMOVED",detail=f"All {role} logins removed by {info['username']}: {', '.join(gone) or 'none'}",
+              actor=info["username"],role="admin",category="ACCESS")
+    return {"ok":True,"removed":gone,**_users_payload()}
+
+@app.post("/api/admin/role-rights")
+async def admin_save_role_rights(request: Request):
+    info=require_admin(request)
+    try: data=await request.json()
+    except Exception: data={}
+    incoming=data.get("role_rights") if isinstance(data,dict) else None
+    if not isinstance(incoming,dict):
+        raise HTTPException(status_code=400,detail="role_rights is required")
+    old=load_role_rights()
+    new={role:[k for k,_ in RIGHTS if k in (incoming.get(role) or [])] for role in USER_ROLES}
+    _write_json(RIGHTS_FILE,new)
+    changes=[]
+    for role in USER_ROLES:
+        added=[k for k in new[role] if k not in old[role]]; removed=[k for k in old[role] if k not in new[role]]
+        if added or removed:
+            changes.append(f"{role}: "+", ".join([f"+{k}" for k in added]+[f"-{k}" for k in removed]))
+    add_event("ADMIN","Admin","ROLE RIGHTS CHANGED",detail="; ".join(changes) or "No change",
+              actor=info["username"],role="admin",category="ACCESS")
+    return {"ok":True,**_users_payload()}
 
 @app.post("/api/admin/logout")
 def admin_logout(request: Request):
@@ -1880,11 +2075,10 @@ def admin_get_config(request: Request):
         "reminder_minutes":5,
         "role":info["role"],
         "username":info["username"],
-        "operator_configured":bool(OPERATOR_PASSWORD_HASH),
-        "operator_username":OPERATOR_USERNAME,
-        "report_config":load_report_config(),
-        # Recipient lists are personal data: Admin only.
-        "notification_config":notification_settings_payload() if info["role"]=="admin" else None,
+        "rights":role_rights(info["role"]),
+        "report_config":load_report_config() if role_has(info["role"],"change_notifications") else None,
+        # Recipient lists are personal data: only for logins allowed to change them.
+        "notification_config":notification_settings_payload() if role_has(info["role"],"change_notifications") else None,
     }
 
 def notification_settings_payload():
@@ -1898,7 +2092,7 @@ def notification_settings_payload():
 
 @app.post("/api/admin/notifications")
 async def admin_save_notifications(request: Request):
-    info=require_admin(request)
+    info=require_right(request,"change_notifications")
     user=f"{info['username']} ({info['role']})"
     try:
         data=await request.json()
@@ -1919,7 +2113,7 @@ async def admin_save_notifications(request: Request):
 
 @app.post("/api/admin/notifications/test-email")
 async def admin_test_notification_email(request: Request):
-    info=require_admin(request)
+    info=require_right(request,"change_notifications")
     now=datetime.now(timezone.utc)
     body=(f"THERMOIQ TEST EMAIL\n\nThis is a test of the alarm email recipients.\n"
           f"Sent by: {info['username']}\nTime: {fmt_local_time(now)}\n\nThermoIQ Temperature Monitoring")
@@ -1934,7 +2128,7 @@ async def admin_test_notification_email(request: Request):
 
 @app.post("/api/admin/notifications/test-text")
 async def admin_test_notification_text(request: Request):
-    require_admin(request)
+    require_right(request,"change_notifications")
     now=datetime.now(timezone.utc)
     message=f"ThermoIQ TEST text alert. Alarms will look like this. {now.astimezone(PLANT_TZ):%H:%M}"
     try:
@@ -1953,7 +2147,7 @@ async def admin_update_all_schedules(request: Request):
     Both Admin and Operator may change schedules. This does not override a
     logger placed in NOT IN USE mode by an Administrator.
     """
-    info=require_settings_access(request)
+    info=require_right(request,"change_schedule")
     role=info["role"]
     user=f"{info['username']} ({role})"
     try:
@@ -1996,16 +2190,22 @@ async def admin_update_config(sn: str, request: Request):
     role=info["role"]
     user=f"{info['username']} ({role})"
     old=get_runtime_cfg(sn)
+    can_schedule=role_has(role,"change_schedule")
+    can_limits=role_has(role,"change_limits")
+    limit_keys={"limit","monitoring_enabled","mode","temperature_offset","humidity_offset"}
+    if limit_keys.intersection(data.keys()) and not can_limits:
+        raise HTTPException(status_code=403,detail=f"Your login ({role}) may not change alarm limits, equipment mode or calibration")
+    if {"schedule_enabled","schedule_week"}.intersection(data.keys()) and not can_schedule:
+        raise HTTPException(status_code=403,detail=f"Your login ({role}) may not change the alarm schedule")
+    if not can_schedule and not can_limits:
+        raise HTTPException(status_code=403,detail=f"Your login ({role}) is read only")
 
-    # Schedule fields are available to both Admin and Operator.
-    schedule_enabled,schedule_week=schedule_from_payload(data,old)
+    # Without the schedule right the saved schedule is kept as it is.
+    schedule_enabled,schedule_week=schedule_from_payload(data if can_schedule else {},old)
 
     old_effective=bool(old.get("effective_monitoring_enabled",old.get("monitoring_enabled",True)))
 
-    if role=="operator":
-        forbidden={"limit","monitoring_enabled","mode","temperature_offset","humidity_offset"}.intersection(data.keys())
-        if forbidden:
-            raise HTTPException(status_code=403,detail="Operator access is limited to the alarm schedule")
+    if not can_limits:
         new=save_runtime_cfg(sn,schedule_enabled=schedule_enabled,schedule_week=schedule_week,updated_by=user)
     else:
         limit=data.get("limit",old["limit"])
@@ -2069,10 +2269,40 @@ async def admin_update_config(sn: str, request: Request):
 
     return {"ok":True,"device":new}
 
+def _time_window(days=None, date=None):
+    """(start_utc, end_utc) for "last N days" or one Pacific calendar day (YYYY-MM-DD); (None, None) = all."""
+    if date:
+        try: d=datetime.strptime(str(date),"%Y-%m-%d")
+        except ValueError: raise HTTPException(status_code=400,detail="date must be YYYY-MM-DD")
+        start=d.replace(tzinfo=PLANT_TZ)
+        return start.astimezone(timezone.utc),(start+timedelta(days=1)).astimezone(timezone.utc)
+    if days:
+        try: n=float(days)
+        except ValueError: raise HTTPException(status_code=400,detail="days must be a number")
+        if n>0:
+            return datetime.now(timezone.utc)-timedelta(days=min(n,3700)),None
+    return None,None
+
+def _filter_rows(rows, time_key, start, end, logger=None, limit=1000):
+    out=[]
+    for r in rows:
+        if not isinstance(r,dict): continue
+        if logger and str(r.get("logger_sn",""))!=str(logger): continue
+        if start or end:
+            t=_iso_dt(r.get(time_key))
+            if not t or (start and t<start) or (end and t>=end): continue
+        out.append(r)
+    total=len(out)
+    limit=max(1,min(int(limit),5000))
+    return out[-limit:],total
+
 @app.get("/api/alarm-events")
-def alarm_events(limit:int=250):
+def alarm_events(limit:int=250, days:str="", date:str="", logger:str=""):
+    """Event log. Optional filters: days=N (last N days), date=YYYY-MM-DD (one Pacific day), logger=serial."""
     with event_lock: rows=_read_json(EVENT_FILE,[])
-    return {"events":rows[-max(1,min(limit,1000)):]}
+    start,end=_time_window(days,date)
+    rows,total=_filter_rows(rows if isinstance(rows,list) else [],"time",start,end,logger or None,limit)
+    return {"events":rows,"total":total,"shown":len(rows)}
 
 @app.delete("/api/alarm-events")
 def clear_alarm_events(request: Request):
@@ -2112,7 +2342,7 @@ def audit_status(request: Request):
     now=datetime.now(timezone.utc)
     cfg=load_audit_config()
     return {
-        "version":"6.2.9",
+        "version":"6.3.0",
         "server_utc":now.isoformat(),
         "server_pacific":now.astimezone(PLANT_TZ).isoformat(),
         "timezone":"America/Vancouver",
@@ -2122,8 +2352,7 @@ def audit_status(request: Request):
             "logged_in":bool(info),
             "username":info.get("username") if info else None,
             "role":info.get("role") if info else "read-only",
-            "admin_username":ADMIN_USERNAME,
-            "operator_username":OPERATOR_USERNAME,
+            "rights":role_rights(info.get("role")) if info else [],
         },
         "devices":[{"logger_sn":sn,"name":get_runtime_cfg(sn)["name"],"alarm_type":get_runtime_cfg(sn).get("alarm_type"),
                     "limit":get_runtime_cfg(sn).get("limit")} for sn in LOGGERS],
@@ -2135,7 +2364,7 @@ def audit_calibrations():
 
 @app.post("/api/admin/audit/calibration/{sn}")
 async def admin_audit_calibration(sn:str, request: Request):
-    info=require_admin(request)
+    info=require_right(request,"edit_calibration")
     try:
         data=await request.json()
     except Exception:
@@ -2169,7 +2398,7 @@ def audit_deviations():
 
 @app.post("/api/audit/deviation")
 async def audit_deviation_save(request: Request):
-    info=require_settings_access(request)
+    info=require_right(request,"edit_deviations")
     try:
         data=await request.json()
     except Exception:
@@ -2182,8 +2411,15 @@ async def audit_deviation_save(request: Request):
     return {"ok":True,"record":rec}
 
 @app.get("/api/audit-trail")
-def audit_trail(limit:int=1000):
-    return {"records":get_audit_records(limit)}
+def audit_trail(limit:int=1000, days:str="", date:str="", logger:str="", category:str=""):
+    """Audit trail. Optional filters: days=N, date=YYYY-MM-DD (Pacific), logger=serial, category."""
+    start,end=_time_window(days,date)
+    rows=get_audit_records(None)
+    if category:
+        rows=[r for r in rows if str(r.get("category","")).upper()==category.upper()]
+    rows,total=_filter_rows(rows,"time_utc",start,end,logger or None,limit)
+    return {"records":rows,"total":total,"shown":len(rows),
+            "categories":sorted({str(r.get("category","")) for r in get_audit_records(None) if r.get("category")})}
 
 @app.get("/api/audit-trail.csv")
 def audit_trail_csv():
@@ -2208,7 +2444,7 @@ async def audit_report_pdf(logger_sn:str,date:str):
 
 @app.post("/api/admin/audit/config")
 async def admin_audit_config(request: Request):
-    info=require_admin(request)
+    info=require_right(request,"manage_backups")
     try:
         data=await request.json()
     except Exception:
@@ -2229,7 +2465,7 @@ async def admin_audit_config(request: Request):
 
 @app.post("/api/admin/audit/backup-now")
 async def admin_audit_backup_now(request: Request):
-    info=require_admin(request)
+    info=require_right(request,"manage_backups")
     path=await asyncio.to_thread(create_audit_backup,"manual",info["username"])
     append_audit_record("MANUAL AUDIT BACKUP CREATED",category="BACKUP",
                         actor=info["username"],role=info["role"],detail=f"Created {path.name}")
@@ -2237,7 +2473,7 @@ async def admin_audit_backup_now(request: Request):
 
 @app.get("/api/admin/audit/latest-backup")
 def admin_audit_latest_backup(request: Request):
-    require_admin(request)
+    require_right(request,"manage_backups")
     status=audit_backup_status()
     if not status.get("available"):
         raise HTTPException(status_code=404,detail="No audit backup is available yet")
@@ -2359,7 +2595,7 @@ async def build_maintenance_report_csv(hours=24,end_utc=None):
     output=io.StringIO(newline="")
     w=csv.writer(output)
     w.writerow(["PBF RISE BAKING BURNABY - TEMPERATURE ALARM DOWNTIME REPORT"])
-    w.writerow(["Report Version","v6.2.9"])
+    w.writerow(["Report Version","v6.3.0"])
     w.writerow(["Report Window Start (Pacific)",_pt_text(start_utc)])
     w.writerow(["Report Window End (Pacific)",_pt_text(end_utc)])
     w.writerow(["Window Hours",hours])
@@ -2686,7 +2922,7 @@ async def temperature_history_all_download(hours:int=24):
 
 @app.post("/api/admin/report-config")
 async def admin_report_config(request: Request):
-    info=require_admin(request)
+    info=require_right(request,"change_notifications")
     try:
         data=await request.json()
     except Exception:
@@ -2704,7 +2940,7 @@ async def admin_report_config(request: Request):
 
 @app.post("/api/admin/send-maintenance-report")
 async def admin_send_maintenance_report(request: Request):
-    info=require_admin(request)
+    info=require_right(request,"change_notifications")
     cfg=load_report_config()
     result=await send_maintenance_report(cfg.get("hours",24),cfg.get("recipient"),manual=True)
     result["requested_by"]=info["username"]

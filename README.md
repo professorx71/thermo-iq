@@ -2,7 +2,7 @@
 
 # ThermoIQ: PBF Rise Baking Burnaby Temperature Monitoring
 
-**Current version: v6.2.9 (Cloud Edition)**
+**Current version: v6.3.0 (Cloud Edition)**
 
 A web dashboard that monitors the plant's coolers and proofers through **LI-COR HOBO loggers**. It reads live temperature and humidity from **LI-COR Cloud** and raises alarms when a reading goes past its limit. Alarms are sent by email and text message, to recipients managed on the Settings page. The dashboard also shows trends, exports CSV and PDF reports, and keeps an audit trail with calibration and deviation records.
 
@@ -470,29 +470,36 @@ rm -r releases/v6.2.0     # an old release you no longer need; never the one 'cu
 | Role | Access |
 |---|---|
 | **Viewer** (no login) | Dashboard, trends, events, downloads. The audit page is read-only. |
-| **Operator** | Viewer access, plus changing **alarm schedules** and recording alarm **corrective actions/deviations** |
-| **Admin** | Everything: limits, monitoring on/off, calibration, accounts, retention, backups, report settings |
+| **Guest** | Default: view the Settings page, read only |
+| **Operator** | Default: view settings, change **alarm schedules**, record alarm **corrective actions/deviations** |
+| **Engineering** | Default: Operator rights plus alarm **limits**, equipment mode, calibration offsets and calibration records |
+| **Admin** | Everything, including user logins and the rights of each role |
 | **Caddy viewer** (cloud only) | Separate HTTP basic-auth login that protects the whole site |
 
+- **Settings → Accounts and passwords** (Admin only):
+  - change the Admin username and password (6+ characters);
+  - add or reset a personal login for each person (Engineering, Operator or Guest, password 4+ characters), remove a login, or turn off all Operator logins at once. A removed or reset login is signed out immediately;
+  - **Rights for each role**: tick what Engineering, Operator and Guest may do. Rights are checked by the server on every request, so a change applies on the person's next action.
+- Every login, failed login, account change and rights change is recorded in the Event and Audit logs.
+- **Lockout:** after 10 wrong passwords from one address within 15 minutes, sign-in from that address is locked for 15 minutes.
 - Sessions last **8 hours** (`pbf_admin_session` cookie, HTTP-only, SameSite=Strict).
-- Passwords are stored as `pbkdf2_sha256$iterations$salt$hash` in `.env`.
-- **Username rules:** 1–64 printable characters. Letters, numbers, spaces and symbols are allowed; leading and trailing spaces are trimmed.
-- **Password rules:** exactly **6 characters**, letters and numbers only (A–Z, a–z, 0–9).
-- The Admin can change their own username and password and reset the Operator account from the Settings page.
+- The Admin password hash is stored in `.env`. User logins are stored in `data/users.json` (PBKDF2 hashes only) and role rights in `data/role_rights.json`.
+- On first start of v6.3, the old single Operator login from `.env` (`OPERATOR_USERNAME` / `OPERATOR_PASSWORD_HASH`) is copied into `data/users.json`. After that, manage Operators in Settings; `SET_OPERATOR_PASSWORD.bat` no longer affects sign-in.
+- **Username rules:** 1–64 printable characters. Letters, numbers, spaces and symbols are allowed; leading and trailing spaces are trimmed. User login names are not case-sensitive.
 
 **Command-line tools** (run from the project root):
 
 | Windows double-click | Command line | Purpose |
 |---|---|---|
 | `windows\SET_ADMIN_PASSWORD.bat` | `python tools/set_admin_password.py` | Set the Admin username and password |
-| `windows\SET_OPERATOR_PASSWORD.bat` | `python tools/set_operator_password.py` | Set the Operator username and password |
+| `windows\SET_OPERATOR_PASSWORD.bat` | `python tools/set_operator_password.py` | Legacy (before v6.3): set the single Operator login in `.env` |
 | none | `python tools/check_auth_config.py` | Check that the hashes in `.env` are valid |
 
 In Docker: `cd cloud && docker compose exec dashboard python tools/set_admin_password.py`
 
 Restart the dashboard after changing a password with these tools.
 
-> The 6-character password protects Settings only. Keep the **Caddy** password long and strong, because it is the outer security layer.
+> The Settings passwords protect Settings only. Keep the **Caddy** password long and strong, because it is the outer security layer.
 
 ---
 
@@ -829,6 +836,7 @@ Version-specific fixes are documented in [docs/release-notes/](docs/release-note
 | v5.3 | Admin password changes, cache fix, weekday/24 h scheduler, calibration and roles, plant logger |
 | v6.0 | Cloud edition (Docker/Caddy), username/password rules, auth fixes |
 | v6.1 | Maintenance downtime report, 7-day trend download, calendar history export |
+| **v6.3.0** | User logins and role rights, collapsible settings, event/audit date filters, trends logger picker |
 | **v6.2.9** | Softer selected tab, heavier ThermoIQ wordmark, lighter title |
 | **v6.2.8** | Softer tab glow, larger site name, smaller title, white bold date and time |
 | **v6.2.7** | New dashboard header and colored navigation tabs |

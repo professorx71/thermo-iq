@@ -11,9 +11,10 @@ function fmtPt(v){
   const d=new Date(v);
   return d.toLocaleString("en-CA",{timeZone:"America/Vancouver",year:"numeric",month:"short",day:"2-digit",hour:"2-digit",minute:"2-digit"});
 }
-function roleCanEditCalibration(){return auditStatus?.access?.role==="admin";}
-function roleCanEditDeviation(){return ["admin","operator"].includes(auditStatus?.access?.role);}
-function roleIsAdmin(){return auditStatus?.access?.role==="admin";}
+const hasRight=r=>(auditStatus?.access?.rights||[]).includes(r);
+function roleCanEditCalibration(){return hasRight("edit_calibration");}
+function roleCanEditDeviation(){return hasRight("edit_deviations");}
+function roleIsAdmin(){return hasRight("manage_backups");}
 
 async function loadStatus(){
   const r=await fetch("/api/audit/status",{cache:"no-store"});
@@ -29,6 +30,9 @@ async function loadStatus(){
   const opts=(auditStatus.devices||[]).map(d=>`<option value="${esc(d.logger_sn)}">${esc(d.name)} — ${esc(d.logger_sn)}</option>`).join("");
   $("reportLogger").innerHTML='<option value="ALL">All Loggers</option>'+opts;
   $("calLogger").innerHTML=opts;
+  const keep=$("trailLogger").value;
+  $("trailLogger").innerHTML='<option value="">All</option><option value="__none">System / no logger</option>'+opts;
+  $("trailLogger").value=keep;
 
   const cfg=auditStatus.retention||{};
   $("retentionYears").value=String(cfg.retention_years||3);
@@ -80,14 +84,33 @@ function populateDeviationFromEpisode(){
 }
 $("devEpisode").addEventListener("change",populateDeviationFromEpisode);
 
+function trailPeriodChanged(){
+  const day=$("trailPeriod").value==="day";
+  $("trailDateWrap").classList.toggle("hidden",!day);
+  if(day&&!$("trailDate").value)$("trailDate").value=todayISO();
+  localStorage.setItem("thermoiq.audit.period",$("trailPeriod").value);
+  loadAuditTrail();
+}
 async function loadAuditTrail(){
-  const r=await fetch("/api/audit-trail?limit=500",{cache:"no-store"}),x=await r.json(),rows=x.records||[];
+  const p=$("trailPeriod").value, q=new URLSearchParams({limit:"5000"}), lg=$("trailLogger").value;
+  if(p==="today")q.set("date",todayISO());
+  else if(p==="day")q.set("date",$("trailDate").value||todayISO());
+  else if(p!=="all")q.set("days",p);
+  if(lg&&lg!=="__none")q.set("logger",lg);
+  if($("trailCategory").value)q.set("category",$("trailCategory").value);
+  const r=await fetch("/api/audit-trail?"+q,{cache:"no-store"}),x=await r.json();
+  let rows=x.records||[];
+  if(lg==="__none")rows=rows.filter(r=>!r.logger_sn||!/^\d+$/.test(String(r.logger_sn)));
+  const cat=$("trailCategory"), keep=cat.value;
+  cat.innerHTML='<option value="">All categories</option>'+(x.categories||[]).map(c=>`<option>${esc(c)}</option>`).join("");
+  cat.value=keep;
+  $("trailCount").textContent=`${rows.length} record${rows.length===1?"":"s"}`+((x.total||0)>(x.shown||0)?` (newest ${x.shown} of ${x.total})`:"");
   $("auditRows").innerHTML=rows.length?rows.slice().reverse().map(r=>`<tr>
     <td>${esc(fmtPt(r.time_utc))}</td><td>${esc(r.category||"")}</td><td><b>${esc(r.action||"")}</b></td>
     <td>${esc(r.actor||"—")}<br><small>${esc(r.role||"")}</small></td>
     <td>${esc(r.name||r.logger_sn||"—")}<br><small>${esc(r.logger_sn||"")}</small></td>
     <td>${esc(r.detail||"")}</td></tr>`).join("")
-    :'<tr><td colspan="6">No audit records available.</td></tr>';
+    :'<tr><td colspan="6">No audit records in this period.</td></tr>';
 }
 
 function downloadAuditReport(){
@@ -97,7 +120,7 @@ function downloadAuditReport(){
 }
 
 async function saveCalibration(){
-  if(!roleCanEditCalibration()){alert("Administrator login is required.");return;}
+  if(!roleCanEditCalibration()){alert("Your login is not allowed to save calibration records.");return;}
   const sn=$("calLogger").value;
   const payload={
     calibration_date:$("calDate").value,
@@ -119,7 +142,7 @@ async function saveCalibration(){
 }
 
 async function saveDeviation(){
-  if(!roleCanEditDeviation()){alert("Admin or Operator login is required.");return;}
+  if(!roleCanEditDeviation()){alert("Your login is not allowed to record deviations.");return;}
   const payload={
     episode_id:$("devEpisode").value,
     status:$("devStatus").value,
@@ -141,7 +164,7 @@ async function saveDeviation(){
 }
 
 async function saveAuditConfig(){
-  if(!roleIsAdmin()){alert("Administrator login is required.");return;}
+  if(!roleIsAdmin()){alert("Your login is not allowed to manage backups.");return;}
   const payload={
     retention_years:Number($("retentionYears").value),
     backup_enabled:$("backupEnabled").value==="true",
@@ -155,7 +178,7 @@ async function saveAuditConfig(){
   await loadStatus(); await loadAuditTrail();
 }
 async function backupNow(){
-  if(!roleIsAdmin()){alert("Administrator login is required.");return;}
+  if(!roleIsAdmin()){alert("Your login is not allowed to manage backups.");return;}
   $("backupMsg").textContent="Creating backup…";
   const r=await fetch("/api/admin/audit/backup-now",{method:"POST"}),x=await r.json().catch(()=>({}));
   if(!r.ok){$("backupMsg").innerHTML=`<span class="bad">${esc(x.detail||"Backup failed")}</span>`;return;}
@@ -163,7 +186,7 @@ async function backupNow(){
   await loadStatus(); await loadAuditTrail();
 }
 function downloadLatestBackup(){
-  if(!roleIsAdmin()){alert("Administrator login is required.");return;}
+  if(!roleIsAdmin()){alert("Your login is not allowed to manage backups.");return;}
   window.location.href="/api/admin/audit/latest-backup";
 }
 
@@ -173,6 +196,7 @@ async function loadAll(){
 }
 
 $("reportDate").value=todayISO();
+{const sp=localStorage.getItem("thermoiq.audit.period");if(sp&&sp!=="day"&&[...$("trailPeriod").options].some(o=>o.value===sp))$("trailPeriod").value=sp;}
 $("calDate").value=todayISO();
 $("devReviewDate").value=todayISO();
 loadAll();

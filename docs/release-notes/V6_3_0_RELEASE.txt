@@ -1,0 +1,4 @@
+ThermoIQ release v6.3.0
+Released 2026-11-27.
+
+- User logins and role rights, collapsible settings, event/audit date filters, trends logger picker

@@ -442,3 +442,56 @@ nav a:hover{box-shadow:0 0 8px rgba(var(--tab-rgb),.30)!important}
 .wordmark .iq{-webkit-text-stroke:1px #d9aa33}
 .topbar h1{font-size:18px;font-weight:400}
 @media(max-width:700px){.topbar h1{font-size:15px}}
+
+/* ===== v6.3 collapsible sections (Settings, Events, Audit, Trends) ===== */
+.fold-toolbar{display:flex;justify-content:space-between;align-items:flex-end;gap:12px;margin:8px 0 12px;padding-bottom:8px;border-bottom:1px solid #3a5568}
+.fold-heading{font-weight:900;letter-spacing:1.4px;text-transform:uppercase;color:#eef8ff;font-size:15px}
+details.fold{margin:0 0 12px;border:1px solid #2c4659;border-left:4px solid #3e6177;border-radius:10px;background:linear-gradient(180deg,#141f29,#111b24)}
+details.fold.hidden{display:none}
+details.fold>summary{cursor:pointer;list-style:none;display:flex;justify-content:space-between;align-items:center;gap:12px;padding:15px 16px;font-weight:800;font-size:16px;color:#f2c94c}
+details.fold>summary::-webkit-details-marker,details.fold-card>summary::-webkit-details-marker{display:none}
+details.fold>summary::after,details.fold-card>summary::after{content:"▸";color:#f2c94c;font-size:13px;transition:transform .15s;flex:0 0 auto}
+details.fold[open]>summary::after,details.fold-card[open]>summary::after{transform:rotate(90deg)}
+details.fold>summary:hover{background:rgba(242,201,76,.05)}
+details.fold[open]>summary{border-bottom:1px solid #253d4f}
+.fold-body{padding:14px 16px 16px}
+.fold-help{color:#9fc3da;font-size:13px;margin:0 0 10px}
+.config-list{display:grid;grid-template-columns:repeat(2,1fr);gap:12px;align-items:start}
+@media(max-width:1100px){.config-list{grid-template-columns:1fr}}
+details.fold-card{padding:0}
+details.fold-card>summary{cursor:pointer;list-style:none;display:flex;justify-content:space-between;align-items:center;gap:10px;padding:14px 16px;margin:0}
+details.fold-card>summary h3{margin:0}
+details.fold-card>summary .pill{margin-left:auto}
+details.fold-card>.fold-body{border-top:1px solid #253d4f}
+/* user logins */
+.user-list{display:flex;flex-direction:column;gap:6px;margin:6px 0 12px}
+.user-row{display:grid;grid-template-columns:110px 1fr auto;align-items:center;gap:10px;padding:6px 8px;border:1px solid #23405a;border-radius:8px;background:#0a1b27}
+.user-role{font-weight:900;font-size:12px}.role-engineering{color:#b99cff}.role-operator{color:#3ce39a}.role-guest{color:#f2cf5b}
+.user-name{color:#eef8ff;font-weight:700}
+button.small{padding:4px 10px;font-size:12px}
+.rights-card{margin-top:18px}
+.rights-table th{text-align:center}.rights-table th:first-child,.rights-table td:first-child{text-align:left}
+.rights-table td{text-align:center}
+.rights-table input[type=checkbox]{width:18px;height:18px;accent-color:#3ce39a;cursor:pointer}
+.rights-table input[type=checkbox]:disabled{cursor:not-allowed;opacity:.75}
+.rights-fixed td{color:#8aa6b8;font-style:italic}
+/* log filters (Events, Audit) */
+.log-filters{display:flex;flex-wrap:wrap;gap:12px;align-items:flex-end;margin:0 0 12px}
+.log-filters label{display:flex;flex-direction:column;gap:5px;color:#9fc3da;font-size:12px;font-weight:800}
+.log-filters select,.log-filters input{background:#0a1b27;color:#eef8ff;border:1px solid #2a4b60;border-radius:9px;padding:9px 10px;font:inherit;min-width:160px}
+.log-count{color:#9fc3da;font-size:13px;margin-left:auto;align-self:center}
+/* Trends: logger picker */
+.logger-picker{display:flex;gap:14px;align-items:flex-start;margin:0 0 16px;padding:12px 14px;border:1px solid #2c4659;border-radius:12px;background:#0f1c27}
+.picker-label{font-weight:900;letter-spacing:1.4px;text-transform:uppercase;color:#9fc3da;font-size:12px;padding-top:12px}
+.logger-chips{display:flex;flex-wrap:wrap;gap:8px}
+.logger-chip{--chip:#49d6ff;display:flex;flex-direction:column;align-items:flex-start;gap:2px;min-width:140px;padding:9px 13px;border-radius:10px;
+  background:#0a1b27!important;border:1px solid #2a4b60!important;border-left:4px solid var(--chip)!important;color:#eef8ff!important;text-align:left;cursor:pointer}
+.logger-chip b{font-size:14px}.logger-chip small{color:#9fc3da;font-size:12px;font-weight:700}
+.logger-chip.chip-ok{--chip:#3ce39a}.logger-chip.chip-alarm{--chip:#ff5d67}.logger-chip.chip-alarm small{color:#ff9aa1}
+.logger-chip.chip-stale{--chip:#ffb259}.logger-chip.chip-monitor{--chip:#5ec3ff}
+.logger-chip:hover{background:#12293a!important}
+.logger-chip.active{background:#173a52!important;border-color:var(--chip)!important;box-shadow:0 0 0 1px var(--chip),0 0 12px rgba(73,214,255,.18)}
+.trend-grid.single{grid-template-columns:1fr}
+.trend-grid.single .trend-card canvas{height:340px}
+@media(max-width:700px){.logger-picker{flex-direction:column;gap:6px}.picker-label{padding-top:0}.logger-chip{min-width:0;flex:1 1 45%}}
+.wordmark small{font-family:"Segoe UI",Arial,sans-serif;font-weight:800;-webkit-text-stroke:0;letter-spacing:1.8px;vertical-align:middle;white-space:nowrap}
