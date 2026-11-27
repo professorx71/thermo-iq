@@ -300,6 +300,10 @@ LOGIN_WINDOW=timedelta(minutes=15)
 login_failures={}
 login_locked_until={}
 
+def _is_https(request: Request):
+    proto=request.headers.get("x-forwarded-proto","").split(",")[0].strip().lower()
+    return proto=="https" or request.url.scheme=="https"
+
 def _client_ip(request: Request):
     host=request.client.host if request.client else ""
     if host in ("127.0.0.1","::1",""):
@@ -858,7 +862,7 @@ def create_audit_backup(reason="scheduled",actor="SYSTEM"):
         "created_utc":now.isoformat(),
         "created_pacific":now.astimezone(PLANT_TZ).isoformat(),
         "timezone":"America/Vancouver",
-        "version":"6.3.1",
+        "version":"6.4.0",
         "reason":reason,
         "actor":actor,
         "note":"Data/config backup only. Secrets in .env are intentionally excluded.",
@@ -964,7 +968,7 @@ async def build_audit_pdf(sn,date_text):
     deviations={str(r.get("episode_id")):r for r in load_deviations()}
 
     dataset={
-        "version":"6.3.1",
+        "version":"6.4.0",
         "date":selected.isoformat(),
         "timezone":"America/Vancouver",
         "logger_serials":serials,
@@ -1654,12 +1658,12 @@ LOGGERS={
 "22547310":{"id":"BP2","name":"Bagel Proofer 2","alarm_type":"low","limit":30.0},
 "22212731":{"id":"PLANT","name":"PBF Plant Temperature","model":"MX1101","alarm_type":"monitor","limit":0.0}}
 
-app=FastAPI(title="ThermoIQ - PBF Burnaby Temperature Dashboard v6.3.1 Cloud Edition")
+app=FastAPI(title="ThermoIQ - PBF Burnaby Temperature Dashboard v6.4.0 Cloud Edition")
 
 @app.get("/api/deployment-status")
 def api_deployment_status():
     return {
-        "version":"6.3.1",
+        "version":"6.4.0",
         "edition":"OVH Cloud",
         "deployment_role":DEPLOYMENT_ROLE,
         "automatic_notifications_enabled":NOTIFICATIONS_ENABLED,
@@ -1830,7 +1834,7 @@ async def v501_status():
     with event_lock:
         events = _read_json(EVENT_FILE, [])
     return {
-        "version": "6.3.1",
+        "version": "6.4.0",
         "logger_count": len(cur.get("devices", [])),
         "loggers": [{"name": d.get("name"), "logger_sn": d.get("logger_sn"), "comm_status": d.get("comm_status"), "age_minutes": d.get("age_minutes")} for d in cur.get("devices", [])],
         "alarm_event_count": len(events),
@@ -1899,7 +1903,7 @@ async def admin_login(request: Request):
     resp.set_cookie(
         "pbf_admin_session",token,
         max_age=SESSION_HOURS*3600,
-        httponly=True,samesite="strict",secure=False,path="/"
+        httponly=True,samesite="strict",secure=_is_https(request),path="/"
     )
     return resp
 
@@ -1945,7 +1949,7 @@ async def admin_change_password(request: Request):
     detail=f"Admin account updated by {user}; username {old_username!r} -> {new_username!r}"
     add_event("ADMIN","Admin","ADMIN ACCOUNT CHANGED",detail=detail)
     resp=JSONResponse({"ok":True,"message":"Admin username/password updated successfully","username":ADMIN_USERNAME,"expires":expiry.isoformat()})
-    resp.set_cookie("pbf_admin_session",token,max_age=SESSION_HOURS*3600,httponly=True,samesite="strict",secure=False,path="/")
+    resp.set_cookie("pbf_admin_session",token,max_age=SESSION_HOURS*3600,httponly=True,samesite="strict",secure=_is_https(request),path="/")
     return resp
 
 def _users_payload():
@@ -2342,7 +2346,7 @@ def audit_status(request: Request):
     now=datetime.now(timezone.utc)
     cfg=load_audit_config()
     return {
-        "version":"6.3.1",
+        "version":"6.4.0",
         "server_utc":now.isoformat(),
         "server_pacific":now.astimezone(PLANT_TZ).isoformat(),
         "timezone":"America/Vancouver",
@@ -2595,7 +2599,7 @@ async def build_maintenance_report_csv(hours=24,end_utc=None):
     output=io.StringIO(newline="")
     w=csv.writer(output)
     w.writerow(["PBF RISE BAKING BURNABY - TEMPERATURE ALARM DOWNTIME REPORT"])
-    w.writerow(["Report Version","v6.3.1"])
+    w.writerow(["Report Version","v6.4.0"])
     w.writerow(["Report Window Start (Pacific)",_pt_text(start_utc)])
     w.writerow(["Report Window End (Pacific)",_pt_text(end_utc)])
     w.writerow(["Window Hours",hours])
@@ -3277,13 +3281,18 @@ async def download_calendar_date_all(date: str):
     )
 
 @app.get("/api/download-range/{sn}")
-async def download_range(sn: str, minutes: int=1440):
+async def download_range(sn: str, minutes: int=1440, start: str="", end: str=""):
     if sn not in LOGGERS:
         raise HTTPException(status_code=404,detail="Unknown logger")
-    minutes=max(10,min(int(minutes),10080))
-    end_utc=datetime.now(timezone.utc).replace(microsecond=0)
-    start_utc=end_utc-timedelta(minutes=minutes)
-    rows=await get_logger_history_chunked(sn,start_utc,end_utc)
+    if start or end:
+        start_utc,end_utc=_date_range_window(start,end or start)
+        minutes=int((end_utc-start_utc).total_seconds()//60)
+        rows=await get_history_parallel(sn,start_utc,end_utc)
+    else:
+        minutes=max(10,min(int(minutes),10080))
+        end_utc=datetime.now(timezone.utc).replace(microsecond=0)
+        start_utc=end_utc-timedelta(minutes=minutes)
+        rows=await get_logger_history_chunked(sn,start_utc,end_utc)
     content,filename=build_paired_logger_csv(sn,rows,minutes,end_utc)
     from fastapi.responses import Response
     return Response(
@@ -3293,10 +3302,14 @@ async def download_range(sn: str, minutes: int=1440):
     )
 
 @app.get("/api/download-range-all.csv")
-async def download_range_all(minutes: int=1440):
-    minutes=max(10,min(int(minutes),10080))
-    end_utc=datetime.now(timezone.utc).replace(microsecond=0)
-    start_utc=end_utc-timedelta(minutes=minutes)
+async def download_range_all(minutes: int=1440, start: str="", end: str=""):
+    if start or end:
+        start_utc,end_utc=_date_range_window(start,end or start)
+        minutes=int((end_utc-start_utc).total_seconds()//60)
+    else:
+        minutes=max(10,min(int(minutes),10080))
+        end_utc=datetime.now(timezone.utc).replace(microsecond=0)
+        start_utc=end_utc-timedelta(minutes=minutes)
     rows=await get_report_history_all(start_utc,end_utc)
     content,filename=build_all_logger_paired_csv(rows,minutes,end_utc)
     from fastapi.responses import Response
@@ -3387,9 +3400,63 @@ async def download_test(sn: str):
     rows=await getdata_range([sn],datetime.now(timezone.utc)-timedelta(minutes=30),datetime.now(timezone.utc))
     return {"ok":True,"logger":sn,"records_returned":len(rows)}
 
+MAX_RANGE_DAYS=31
+
+def _date_range_window(start: str, end: str):
+    """Pacific calendar days start..end (inclusive) as UTC datetimes; end is capped at now."""
+    try:
+        d1=datetime.strptime(str(start),"%Y-%m-%d").date(); d2=datetime.strptime(str(end),"%Y-%m-%d").date()
+    except ValueError:
+        raise HTTPException(status_code=400,detail="Start and end dates must use YYYY-MM-DD")
+    if d2<d1:
+        raise HTTPException(status_code=400,detail="End date is before start date")
+    if (d2-d1).days+1>MAX_RANGE_DAYS:
+        raise HTTPException(status_code=400,detail=f"Choose at most {MAX_RANGE_DAYS} days")
+    start_utc=datetime.combine(d1,datetime.min.time(),tzinfo=PLANT_TZ).astimezone(timezone.utc)
+    end_utc=min(datetime.combine(d2+timedelta(days=1),datetime.min.time(),tzinfo=PLANT_TZ).astimezone(timezone.utc),
+                datetime.now(timezone.utc).replace(microsecond=0))
+    if end_utc<=start_utc:
+        raise HTTPException(status_code=400,detail="Future dates are not available")
+    return start_utc,end_utc
+
+async def get_history_parallel(sn, start_utc, end_utc, chunk_hours=6, parallel=6):
+    """Like get_logger_history_chunked, but fetches several 6-hour chunks at once (long ranges)."""
+    chunks=[]; cursor=start_utc
+    while cursor<end_utc:
+        nxt=min(cursor+timedelta(hours=chunk_hours),end_utc); chunks.append((cursor,nxt)); cursor=nxt
+    rows=[]
+    for i in range(0,len(chunks),parallel):
+        for part in await asyncio.gather(*(getdata_range([sn],a,b) for a,b in chunks[i:i+parallel])):
+            rows.extend(part)
+    unique={}
+    for q in rows:
+        typ=str(q.get("sensor_measurement_type","")).lower()
+        if typ in ("temperature","rh"):
+            unique[(str(q.get("timestamp","")),typ,str(q.get("sensor_sn","")))]=calibrated_row(q)
+    return sorted(unique.values(),key=lambda q:(str(q.get("timestamp","")),str(q.get("sensor_measurement_type",""))))
+
+def _thin(rows, per_type=1500):
+    """Keep at most per_type points of each measurement for drawing; always keeps the min and max."""
+    out=[]
+    for typ in ("temperature","rh"):
+        part=[q for q in rows if str(q.get("sensor_measurement_type","")).lower()==typ]
+        if len(part)<=per_type:
+            out.extend(part); continue
+        step=len(part)/per_type
+        keep={int(i*step) for i in range(per_type)}
+        vals=[float(q.get("value") or 0) for q in part]
+        keep.add(vals.index(min(vals))); keep.add(vals.index(max(vals))); keep.add(len(part)-1)
+        out.extend(part[i] for i in sorted(keep))
+    return sorted(out,key=lambda q:str(q.get("timestamp","")))
+
 @app.get("/api/history/{sn}")
-async def history(sn:str,minutes:int=60):
+async def history(sn:str,minutes:int=60,start:str="",end:str=""):
+    """Graph data: the last `minutes`, or Pacific calendar days start..end (YYYY-MM-DD, up to 31 days)."""
     if sn not in LOGGERS: raise HTTPException(404,"Unknown logger")
+    if start or end:
+        start_utc,end_utc=_date_range_window(start,end or start)
+        rows=_thin(await get_history_parallel(sn,start_utc,end_utc))
+        return {"logger":get_runtime_cfg(sn),"data":rows,"start":start_utc.isoformat(),"end":end_utc.isoformat()}
     rows=await getdata([sn],max(10,min(minutes,10080)))
     return {"logger":get_runtime_cfg(sn),"data":[calibrated_row(q) for q in rows]}
 

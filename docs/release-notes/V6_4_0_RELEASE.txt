@@ -1,0 +1,4 @@
+ThermoIQ release v6.4.0
+Released 2026-11-27.
+
+- Same header on all pages, Trends compare and custom dates, big screen mode, phone fixes, HTTPS-only login cookie

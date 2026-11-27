@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>ThermoIQ · Cooler & Freezer Continuous Monitoring</title>
-<link rel="icon" type="image/svg+xml" href="/static/thermoiq-mark.svg"><link rel="stylesheet" href="/static/style.css?v=6.3.1">
+<link rel="icon" type="image/svg+xml" href="/static/thermoiq-mark.svg"><link rel="stylesheet" href="/static/style.css?v=6.4.0">
 </head>
 <body>
 <header class="topbar">
@@ -14,7 +14,7 @@
     <div>
       <div class="wordmark">Thermo<span class="iq">IQ</span></div>
       <h1>Cooler &amp; Freezer Continuous Monitoring &amp; Reporting</h1>
-      <p>v6.3.1</p>
+      <p>v6.4.0</p>
     </div>
   </div>
   <nav>
@@ -25,6 +25,7 @@
   <div id="conn" class="connection">Connecting…</div>
 </header>
 
+<button type="button" id="tvExit" class="tv-exit" onclick="setTv(false)">Exit big screen</button>
 <main>
   <section id="alarmBanner" class="alarm-banner hidden">
     <div>
@@ -74,6 +75,7 @@
         <button id="cBtn" class="unit-active" onclick="setUnit(false)">°C</button>
         <button id="fBtn" onclick="setUnit(true)">°F</button>
       </div>
+      <button type="button" class="tv-btn" onclick="setTv(true)" title="Full-screen view for a wall TV">Big screen</button>
       <a class="button primary" href="/trends">View Trends →</a>
     </div>
   </section>
@@ -93,8 +95,8 @@
 </main>
 
 <footer>
-  PBF Rise Baking Burnaby · Environmental Monitoring Dashboard · v6.3.1
+  PBF Rise Baking Burnaby · Cooler &amp; Freezer Continuous Monitoring &amp; Reporting · v6.4.0
 </footer>
-<script src="/static/dashboard.js?v=6.3.1"></script>
+<script src="/static/dashboard.js?v=6.4.0"></script>
 </body>
 </html>

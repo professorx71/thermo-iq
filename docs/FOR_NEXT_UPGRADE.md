@@ -1,59 +1,51 @@
 # For Next Upgrade — ThermoIQ recommendations
 
-Written 2026-11-27, after release v6.3.0. Ordered by priority.
+Written 2026-11-27, after release v6.3.0.
 
-## 1. Finish what is already started
+**How to start an update:** tell Claude the item numbers, e.g. *"do U3, U9 and U14"*. Tick `[x]` when an item is done.
+Items marked **(you)** are settings or commands you can do yourself without a release.
 
-| # | Item | Why | Effort |
-|---|---|---|---|
-| 1.1 | **Turn on the domain `thermoiq.octaveworks.com`.** Run `cloud/add_domain.sh` on the server (steps in `docs/guides/CLOUD_DEPLOYMENT.txt`). | DNS already points to the server, but Caddy does not serve the name yet. Today the site is reached by IP address. | 15 min |
-| 1.2 | **Make the login cookie HTTPS-only** once 1.1 is done (`secure=True` on `pbf_admin_session`). | The cookie that keeps people signed in to Settings could otherwise be sent over plain HTTP. | Small |
-| 1.3 | **Set up the report sender `reports@octaveworks.com`.** Run `windows\SET_SENDER_EMAIL.bat --report --email reports@octaveworks.com --host mail.octaveworks.com`, then click *Email Report Now*. | The code is live, but reports still come from `alarm@octaveworks.com`. | 5 min |
-| 1.4 | **Point git at the new GitHub address:** `git remote set-url origin git@github.com:professorx71/thermo-iq.git` | GitHub warns on every release that the repository moved. The old address may stop working. | 1 min |
+## A. Finish what is already started
+- [x] **U1 — Turn on the domain `thermoiq.octaveworks.com`.** Run `cloud/add_domain.sh` on the server. DNS is ready, but the site is still reached by IP address.
+- [x] **U2 — Make the Settings login cookie HTTPS-only.** Do this after U1, so the sign-in cookie is never sent over plain HTTP.
+- [ ] **U3 — Report sender `reports@octaveworks.com`** (you). Run `windows\SET_SENDER_EMAIL.bat --report --email reports@octaveworks.com --host mail.octaveworks.com`, then click *Email Report Now*.
+- [x] **U4 — Update the GitHub address** (you). Run `git remote set-url origin git@github.com:professorx71/thermo-iq.git`. The repository has moved.
 
-## 2. Alarm reliability (food-safety risk)
+## B. Alarm reliability (food-safety risk)
+- [ ] **U5 — Review the alarm schedules** (you). Some loggers had Thursday OFF, and schedules ending at 05:59 leave a one-minute gap each day. Consider 24 h ON for coolers.
+- [ ] **U6 — Check Tortilla L3 Cooler** (you). It had been in alarm for about 33 days. Fix the cooler, or correct its limit or mode.
+- [ ] **U7 — Add text-message recipients** (you). There are none yet, so email is the only alert.
+- [ ] **U8 — "No data" alarm.** Email when a logger sends no readings for 30+ minutes, or when the LI-COR connection fails.
+- [ ] **U9 — Outside "is the server alive" check.** An uptime monitor emails if the whole site goes down, because then no alarm can be sent at all.
+- [ ] **U10 — Alarm escalation.** If an alarm is not acknowledged within, for example, 30 minutes, also email or text a supervisor list.
 
-| # | Item | Why |
-|---|---|---|
-| 2.1 | **Review the alarm schedules.** | Tortilla L3 Cooler and Bagel Proofer 1 and 2 had alarms scheduled OFF on Thursday, so out-of-limit readings sent no message. Schedules ending at 05:59 also leave a one-minute gap each day. Consider 24 h ON for coolers. |
-| 2.2 | **Investigate Tortilla L3 Cooler.** | It had been in alarm for about 33 days. Either the cooler has a fault or its limit or mode is wrong (for example, it should be set to NOT IN USE). |
-| 2.3 | **Add text-message recipients.** | There are currently 0 text recipients, so email is the only alert. |
-| 2.4 | **"No data" alarm.** Email when a logger has sent no readings for 30+ minutes, or when the LI-COR connection fails. | A dead logger or lost connection currently shows only on screen. Nobody is told. |
-| 2.5 | **Outside "is the server alive" check** (for example, a free uptime monitor that emails if the site is down). | If the server itself stops, no alarm can be sent at all. |
+## C. Logins and security
+- [ ] **U11 — Stay signed in across updates.** Sessions and the wrong-password lockout currently reset on every deploy or restart.
+- [ ] **U12 — Require a login to acknowledge alarms.** This becomes a new right in *Rights for each role*, so the Audit log shows who really acknowledged.
+- [ ] **U13 — Back up user logins safely.** `users.json` and `role_rights.json` are not in the backup ZIP. Add an encrypted copy.
+- [ ] **U14 — Remove the old Operator tool** (`SET_OPERATOR_PASSWORD.bat`) and the `OPERATOR_*` lines in `.env`. They no longer control sign-in.
+- [ ] **U15 — Admin "forgot password" note in Settings.** It shows the one server command to reset the Admin login.
 
-## 3. Logins and security (follow-up to v6.3)
+## D. Reports and records
+- [ ] **U16 — Calibration-due reminder email**, 14 days before each logger's next calibration date.
+- [ ] **U17 — Summary at the top of the daily report email**: loggers out of limit, minutes out of limit, open deviations.
+- [ ] **U18 — Weekly and monthly Excel report** (one sheet per logger) for QA and audits.
+- [ ] **U19 — Excel download with a date range on the Events page**, using the same filters you see on screen.
+- [ ] **U20 — Audit trail Excel download** for the selected day or period. Today the CSV download always contains everything.
+- [ ] **U21 — Daily min, max and average chart per logger in the Excel report**, as a chart inside each worksheet.
 
-| # | Item | Why |
-|---|---|---|
-| 3.1 | **Keep people signed in across updates.** Store sessions in a file instead of memory. | Every deploy or restart signs everyone out of Settings, and resets the wrong-password lockout. |
-| 3.2 | **Optional: require a login to acknowledge alarms** (a new right in *Rights for each role*). | Today anyone on the dashboard can acknowledge by typing any name, so the Audit log can't prove who did it. |
-| 3.3 | **Back up user logins separately.** Encrypt `data/users.json` and `data/role_rights.json` in the backup, or keep a protected copy. | They are left out of the backup ZIP on purpose because they hold password hashes. After a restore, people must be re-added by hand. |
-| 3.4 | **Remove the old Operator tool** (`SET_OPERATOR_PASSWORD.bat`, `tools/set_operator_password.py`) and the `OPERATOR_*` lines in `.env`. | Since v6.3 they no longer control who can sign in, which could confuse someone. |
+## E. Dashboard and look
+- [x] **U22 — Use the new dashboard header on every page.** "PBF Rise Baking Burnaby" centred, same title style.
+- [x] **U23 — New dashboard footer text:** "Cooler & Freezer Continuous Monitoring & Reporting".
+- [x] **U24 — Phone check and fixes** for every page, especially Settings → Accounts and the Trends logger buttons.
+- [x] **U25 — Trends: compare loggers.** Tick two or more loggers and see them on one chart.
+- [x] **U26 — Trends: custom date range.** Pick any start and end date, not only 1 hour, 24 hours or 7 days.
+- [x] **U27 — Dashboard "big screen" mode** for a wall TV: large tiles, no menus, auto-refresh.
 
-## 4. Reports and records
-
-| # | Item | Why |
-|---|---|---|
-| 4.1 | **Calibration-due reminder email**, 14 days before each logger's *Next Calibration Due* date. | Due dates are recorded but nobody is reminded. |
-| 4.2 | **Short summary at the top of the daily report email**: loggers out of limit, minutes out of limit, open deviations. | People can see the important part without opening the attachments. |
-| 4.3 | **Weekly or monthly Excel report** (same one-sheet-per-logger layout) for QA and audits. | Today it covers 24 h, 48 h or 7 days only. |
-| 4.4 | **Excel download button with a date range on the Events page.** | The event log can now be filtered on screen, but downloads are fixed at 24 h and 30 days. |
-
-## 5. Look and feel
-
-| # | Item |
-|---|---|
-| 5.1 | Use the new dashboard header on every page: "PBF Rise Baking Burnaby" centred, and the same title style. |
-| 5.2 | Change the dashboard footer, which still says "Environmental Monitoring Dashboard", to "Cooler & Freezer Continuous Monitoring & Reporting". |
-| 5.3 | Check every page on a phone, especially Settings → Accounts and the Trends logger buttons. |
-
-## 6. Housekeeping
-
-| # | Item | Why |
-|---|---|---|
-| 6.1 | **Keep the automated tests in the project** (`tests/`), and run them before each release. | The tests used for v6.3 (logins, rights, lockout, filters) live only in a temporary folder. |
-| 6.2 | **Install `docker buildx` on the server.** | Removes the warning shown during each deploy and speeds up builds. |
-| 6.3 | **Plan to move records from JSON files to a small database (SQLite)** once history grows past about a year. | Event and audit files are read in full on every page load and will slow down over time. |
+## F. Housekeeping
+- [ ] **U28 — Keep the automated tests in the project** (`tests/`) and run them before each release.
+- [ ] **U29 — Install `docker buildx` on the server.** This removes the deploy warning and speeds up builds.
+- [ ] **U30 — Move records from JSON files to SQLite.** Do it before history grows past about a year, because the files slow down as they grow.
 
 ---
-**Suggested next release (v6.4):** 1.1–1.4, 2.4, 3.1, 4.1, 5.1 and 5.2. Items 2.1–2.3 are settings changes you can make today without a release.
+**Suggested next release (v6.4):** U1, U2, U8, U9, U11, U16, U22, U23 — plus U3–U7 done by you.

@@ -344,4 +344,27 @@ window.addEventListener("resize", () => {
 
 initialLoad();
 setInterval(loadCurrent, 60000);
+
+// ---- Big screen (wall TV) mode: /?tv=1 opens straight into it ----
+let wakeLock=null;
+async function setTv(on){
+  document.body.classList.toggle("tv",on);
+  const url=new URL(location.href);
+  on?url.searchParams.set("tv","1"):url.searchParams.delete("tv");
+  history.replaceState(null,"",url);
+  try{
+    if(on&&!document.fullscreenElement&&document.documentElement.requestFullscreen)await document.documentElement.requestFullscreen();
+    if(!on&&document.fullscreenElement)await document.exitFullscreen();
+  }catch(e){}
+  try{
+    if(on&&"wakeLock" in navigator)wakeLock=await navigator.wakeLock.request("screen");   // keep the TV screen awake
+    if(!on&&wakeLock){wakeLock.release();wakeLock=null;}
+  }catch(e){}
+  setTimeout(()=>loadDashboardHistory(true),300);   // redraw graphs at the new size
+}
+document.addEventListener("visibilitychange",()=>{if(document.body.classList.contains("tv")&&document.visibilityState==="visible")setTv(true);});
+if(new URLSearchParams(location.search).get("tv")==="1"){
+  document.body.classList.add("tv");
+  setTimeout(()=>location.reload(),6*60*60*1000);   // reload every 6 h so the TV picks up new versions
+}
 setInterval(() => loadDashboardHistory(true), 5 * 60 * 1000);

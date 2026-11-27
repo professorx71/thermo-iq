@@ -495,3 +495,39 @@ button.small{padding:4px 10px;font-size:12px}
 .trend-grid.single .trend-card canvas{height:340px}
 @media(max-width:700px){.logger-picker{flex-direction:column;gap:6px}.picker-label{padding-top:0}.logger-chip{min-width:0;flex:1 1 45%}}
 .wordmark small{font-family:"Segoe UI",Arial,sans-serif;font-weight:800;-webkit-text-stroke:0;letter-spacing:1.8px;vertical-align:middle;white-space:nowrap}
+
+/* ===== v6.4 big screen (wall TV) mode: /?tv=1 ===== */
+.tv-exit{display:none}
+body.tv .topbar nav,body.tv .dashboard-head .actions,body.tv .dashboard-head p,body.tv main>.panel,body.tv footer{display:none!important}
+body.tv .topbar{position:relative;min-height:0;padding:14px 28px;grid-template-columns:1fr auto}
+body.tv .brand-logo{width:76px;height:76px}
+body.tv .wordmark{font-size:32px}
+body.tv .connection{font-size:20px}
+body.tv .connection small{font-size:20px}
+body.tv main{max-width:none;padding:18px 24px}
+body.tv .hero-grid{gap:12px;margin-bottom:12px}
+body.tv .hero-card strong{font-size:44px}
+body.tv .dashboard-head{margin:6px 0 10px}
+body.tv .instrument-grid{grid-template-columns:repeat(auto-fit,minmax(420px,1fr));gap:14px}
+body.tv .instrument h3{font-size:26px}
+body.tv .reading-temp,body.tv .reading-rh{font-size:44px}
+body.tv .tv-exit{display:block;position:fixed;right:14px;bottom:14px;z-index:50;opacity:.15;transition:opacity .2s}
+body.tv .tv-exit:hover,body.tv .tv-exit:focus{opacity:1}
+.tv-btn{white-space:nowrap}
+@media(max-width:900px){body.tv .instrument-grid{grid-template-columns:1fr}}
+/* Trends: custom range + compare */
+.custom-range{display:flex;flex-wrap:wrap;gap:12px;align-items:flex-end;margin:0 0 14px;padding:12px 14px;border:1px solid #2c4659;border-radius:12px;background:#0f1c27}
+.custom-range.hidden{display:none}
+.custom-range label{display:flex;flex-direction:column;gap:5px;color:#9fc3da;font-size:12px;font-weight:800}
+.custom-range input{background:#0a1b27;color:#eef8ff;border:1px solid #2a4b60;border-radius:9px;padding:9px 10px;font:inherit}
+.picker-side{margin-left:auto;display:flex;flex-direction:column;align-items:flex-end;gap:6px}
+.picker-side .fold-help{margin:0;white-space:nowrap}
+.chip-swatch{display:inline-block;width:10px;height:10px;border-radius:3px;margin-right:6px;vertical-align:middle}
+.compare-legend{display:flex;flex-wrap:wrap;gap:14px;margin:6px 0 4px;color:#dff5ff;font-weight:700;font-size:13px}
+.compare-legend i{display:inline-block;width:18px;height:4px;border-radius:2px;margin-right:6px;vertical-align:middle}
+@media(max-width:700px){.picker-side{margin-left:0;align-items:stretch;width:100%}}
+/* phone fix: keep the hidden day-switch checkboxes inside their chip (they pushed the page wider than the screen) */
+.day-chip,.day-switch{position:relative}
+.day-chip input,.day-switch input{left:0;top:0;width:1px;height:1px;margin:0}
+/* big screen: readings scale with the screen so "55.0 %RH" never gets cut off */
+body.tv .reading-temp,body.tv .reading-rh{font-size:clamp(26px,2.3vw,48px)}
