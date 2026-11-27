@@ -1,0 +1,4 @@
+ThermoIQ release v6.2.9
+Released 2026-11-26.
+
+- Softer selected tab, heavier ThermoIQ wordmark, lighter title

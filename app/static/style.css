@@ -429,3 +429,16 @@ nav a.active{color:#08131c!important;text-shadow:0 0 4px rgba(255,255,255,.35);p
 .topbar h1{font-size:22px}
 .connection small{color:#fff!important;font-weight:800;font-size:14px}
 @media(max-width:700px){.topbar h1{font-size:18px}}
+
+/* ===== v6.2.9 softer selected tab: tinted fill instead of solid, gentle glow ===== */
+nav a.active{color:#fff!important;background:rgba(var(--tab-rgb),.30)!important;border-color:rgba(var(--tab-rgb),.75);text-shadow:none;
+  box-shadow:0 0 8px rgba(var(--tab-rgb),.45),0 0 18px rgba(var(--tab-rgb),.20)!important;animation:tabGlowSoft 3s ease-in-out infinite}
+@keyframes tabGlowSoft{50%{box-shadow:0 0 10px rgba(var(--tab-rgb),.55),0 0 22px rgba(var(--tab-rgb),.28)}}
+nav a:hover{box-shadow:0 0 8px rgba(var(--tab-rgb),.30)!important}
+@media(prefers-reduced-motion:reduce){nav a.active{animation:none}}
+
+/* ===== v6.2.9 heavier ThermoIQ wordmark, lighter subtitle ===== */
+.wordmark{font-family:"Segoe UI Black","Arial Black","Helvetica Neue",Arial,sans-serif;font-weight:900;letter-spacing:-.4px;-webkit-text-stroke:1px #fff}
+.wordmark .iq{-webkit-text-stroke:1px #d9aa33}
+.topbar h1{font-size:18px;font-weight:400}
+@media(max-width:700px){.topbar h1{font-size:15px}}

@@ -2,7 +2,7 @@
 
 # ThermoIQ: PBF Rise Baking Burnaby Temperature Monitoring
 
-**Current version: v6.2.8 (Cloud Edition)**
+**Current version: v6.2.9 (Cloud Edition)**
 
 A web dashboard that monitors the plant's coolers and proofers through **LI-COR HOBO loggers**. It reads live temperature and humidity from **LI-COR Cloud** and raises alarms when a reading goes past its limit. Alarms are sent by email and text message, to recipients managed on the Settings page. The dashboard also shows trends, exports CSV and PDF reports, and keeps an audit trail with calibration and deviation records.
 
@@ -829,6 +829,7 @@ Version-specific fixes are documented in [docs/release-notes/](docs/release-note
 | v5.3 | Admin password changes, cache fix, weekday/24 h scheduler, calibration and roles, plant logger |
 | v6.0 | Cloud edition (Docker/Caddy), username/password rules, auth fixes |
 | v6.1 | Maintenance downtime report, 7-day trend download, calendar history export |
+| **v6.2.9** | Softer selected tab, heavier ThermoIQ wordmark, lighter title |
 | **v6.2.8** | Softer tab glow, larger site name, smaller title, white bold date and time |
 | **v6.2.7** | New dashboard header and colored navigation tabs |
 | **v6.2.6** | Reports format and add reports email |

@@ -1,5 +1,5 @@
 PBF Rise Baking Burnaby Temperature Dashboard
-v6.2.8 OVH Cloud Edition
+v6.2.9 OVH Cloud Edition
 
 ARCHITECTURE
 LI-COR Cloud -> OVH VPS -> PBF Dashboard -> email/text messages
