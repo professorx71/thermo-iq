@@ -565,6 +565,148 @@ def _write_json(path, obj):
 
 audit_lock=threading.RLock()  # re-entrant: matches the production hotfix on the VPS
 
+# ---------------------------------------------------------------- record store (SQLite)
+# Alarm events and the audit trail live in data/thermoiq.db (v6.5+). Each row keeps the
+# full original record as JSON, plus indexed columns for time / logger / category.
+# The old alarm_events.json / audit_trail.json are imported at start-up (INSERT OR IGNORE,
+# so repeating it is harmless) and left in place untouched, so rolling back to v6.4 still
+# shows the history up to the upgrade.
+import sqlite3
+DB_FILE=DATA_DIR/"thermoiq.db"
+db_lock=threading.RLock()
+_db=None
+
+def _ts_key(value):
+    """Fixed-width UTC text that sorts and compares correctly: 2026-11-27T20:00:00.000000"""
+    t=_iso_dt(value)
+    if not t:
+        return ""
+    if not t.tzinfo:
+        t=t.replace(tzinfo=timezone.utc)
+    return t.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")
+
+def db():
+    global _db
+    with db_lock:
+        if _db is None:
+            conn=sqlite3.connect(str(DB_FILE),check_same_thread=False,timeout=30)
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("PRAGMA synchronous=NORMAL")
+            conn.executescript("""
+                CREATE TABLE IF NOT EXISTS events(
+                    id TEXT PRIMARY KEY, ts TEXT NOT NULL, logger_sn TEXT, event TEXT, data TEXT NOT NULL);
+                CREATE INDEX IF NOT EXISTS events_ts ON events(ts);
+                CREATE INDEX IF NOT EXISTS events_logger_ts ON events(logger_sn, ts);
+                CREATE TABLE IF NOT EXISTS audit(
+                    id TEXT PRIMARY KEY, ts TEXT NOT NULL, logger_sn TEXT, category TEXT,
+                    source_event_id TEXT, data TEXT NOT NULL);
+                CREATE INDEX IF NOT EXISTS audit_ts ON audit(ts);
+                CREATE INDEX IF NOT EXISTS audit_source ON audit(source_event_id);
+            """)
+            _db=conn
+            _import_json_history(conn)
+        return _db
+
+def _event_row(rec):
+    return (str(rec.get("id") or uuid.uuid4().hex),_ts_key(rec.get("time")),str(rec.get("logger_sn","")),
+            str(rec.get("event","")),json.dumps(rec,ensure_ascii=False))
+
+def _audit_row(rec):
+    return (str(rec.get("id") or uuid.uuid4().hex),_ts_key(rec.get("time_utc")),str(rec.get("logger_sn","")),
+            str(rec.get("category","")),str(rec.get("source_event_id") or ""),json.dumps(rec,ensure_ascii=False))
+
+def _import_json_history(conn):
+    """Copy the pre-v6.5 JSON history into the database (only rows inside the retention period)."""
+    try:
+        years=int((_read_json(AUDIT_CONFIG_FILE,{}) or {}).get("retention_years",3))
+    except Exception:
+        years=3
+    cutoff=(datetime.now(timezone.utc)-timedelta(days=365*years)).strftime("%Y-%m-%dT%H:%M:%S.%f")
+    for path,table,row in ((EVENT_FILE,"events",_event_row),(AUDIT_FILE,"audit",_audit_row)):
+        rows=_read_json(path,[]) if path.exists() else []
+        if not isinstance(rows,list) or not rows:
+            continue
+        vals=[row(r) for r in rows if isinstance(r,dict)]
+        vals=[v for v in vals if v[1]=="" or v[1]>=cutoff]
+        marks=",".join("?"*len(vals[0])) if vals else ""
+        if vals:
+            cur=conn.executemany(f"INSERT OR IGNORE INTO {table} VALUES({marks})",vals)
+            conn.commit()
+            if cur.rowcount and cur.rowcount>0:
+                print(f"Imported {cur.rowcount} record(s) from {path.name} into {DB_FILE.name}")
+
+def db_add_event(rec):
+    with db_lock:
+        db().execute("INSERT OR REPLACE INTO events VALUES(?,?,?,?,?)",_event_row(rec)); db().commit()
+
+def db_update_event(event_id, changes):
+    with db_lock:
+        row=db().execute("SELECT data FROM events WHERE id=?",(event_id,)).fetchone()
+        if not row:
+            return
+        rec=json.loads(row[0]); rec.update(changes)
+        db().execute("UPDATE events SET data=?, event=? WHERE id=?",(json.dumps(rec,ensure_ascii=False),str(rec.get("event","")),event_id))
+        db().commit()
+
+def _where(start=None,end=None,logger=None,extra=None):
+    sql=[]; args=[]
+    if start: sql.append("ts>=?"); args.append(_ts_key(start))
+    if end: sql.append("ts<?"); args.append(_ts_key(end))
+    if logger: sql.append("logger_sn=?"); args.append(str(logger))
+    for clause,val in (extra or []):
+        sql.append(clause); args.append(val)
+    return (" WHERE "+" AND ".join(sql)) if sql else "",args
+
+def db_events(start=None,end=None,logger=None,limit=None):
+    """Events oldest -> newest. limit keeps the newest N."""
+    w,args=_where(start,end,logger)
+    with db_lock:
+        if limit:
+            rows=db().execute(f"SELECT data FROM (SELECT data,ts,rowid FROM events{w} ORDER BY ts DESC, rowid DESC LIMIT ?) ORDER BY ts, rowid",args+[int(limit)]).fetchall()
+        else:
+            rows=db().execute(f"SELECT data FROM events{w} ORDER BY ts, rowid",args).fetchall()
+    return [json.loads(r[0]) for r in rows]
+
+def db_count_events(start=None,end=None,logger=None):
+    w,args=_where(start,end,logger)
+    with db_lock:
+        return db().execute(f"SELECT COUNT(*) FROM events{w}",args).fetchone()[0]
+
+def db_add_audit(rec):
+    with db_lock:
+        db().execute("INSERT OR REPLACE INTO audit VALUES(?,?,?,?,?,?)",_audit_row(rec)); db().commit()
+
+def db_audit(start=None,end=None,logger=None,category=None):
+    extra=[("category=?",category)] if category else []
+    w,args=_where(start,end,logger,extra)
+    with db_lock:
+        rows=db().execute(f"SELECT data FROM audit{w} ORDER BY ts, rowid",args).fetchall()
+    return [json.loads(r[0]) for r in rows]
+
+def db_unaudited_events(start=None,end=None,logger=None):
+    """Old (pre-v6.2) events that have no matching audit record."""
+    w,args=_where(start,end,logger)
+    w=(w+" AND " if w else " WHERE ")+"id NOT IN (SELECT source_event_id FROM audit WHERE source_event_id<>'')"
+    with db_lock:
+        rows=db().execute(f"SELECT data FROM events{w} ORDER BY ts, rowid",args).fetchall()
+    return [json.loads(r[0]) for r in rows]
+
+def db_audit_categories():
+    with db_lock:
+        cats=[r[0] for r in db().execute("SELECT DISTINCT category FROM audit WHERE category<>''").fetchall()]
+        if db().execute("SELECT 1 FROM events WHERE id NOT IN (SELECT source_event_id FROM audit WHERE source_event_id<>'') LIMIT 1").fetchone():
+            cats.append("LEGACY EVENT")
+    return sorted(set(cats))
+
+def db_prune(years):
+    cutoff=(datetime.now(timezone.utc)-timedelta(days=365*int(years))).strftime("%Y-%m-%dT%H:%M:%S.%f")
+    with db_lock:
+        n1=db().execute("DELETE FROM events WHERE ts<>'' AND ts<?",(cutoff,)).rowcount
+        n2=db().execute("DELETE FROM audit WHERE ts<>'' AND ts<?",(cutoff,)).rowcount
+        db().commit()
+    return n1,n2
+
+
 def load_audit_config():
     default={
         "retention_years":3,
@@ -662,45 +804,30 @@ def append_audit_record(action, *, category="SYSTEM", actor="SYSTEM", role="syst
     }
     if isinstance(extra,dict):
         rec["extra"]=extra
-    # Read retention BEFORE taking audit_lock: load_audit_config() takes audit_lock
-    # itself, and threading.Lock is not re-entrant (doing it inside = deadlock).
-    years=load_audit_config().get("retention_years",3)
-    with audit_lock:
-        rows=_read_json(AUDIT_FILE,[])
-        if not isinstance(rows,list):
-            rows=[]
-        rows.append(rec)
-        rows=_prune_list_by_retention(rows,years)
-        _write_json(AUDIT_FILE,rows)
+    db_add_audit(rec)   # retention is enforced once a day by enforce_audit_retention()
     return rec["id"]
 
-def get_audit_records(limit=1000):
-    with audit_lock:
-        rows=_read_json(AUDIT_FILE,[])
-    if not isinstance(rows,list):
-        rows=[]
-    # Include legacy alarm/config events so pre-v6.2 history remains visible.
-    with event_lock:
-        legacy=_read_json(EVENT_FILE,[])
-    known={r.get("source_event_id") for r in rows if isinstance(r,dict) and r.get("source_event_id")}
-    for e in legacy if isinstance(legacy,list) else []:
-        if e.get("id") in known:
-            continue
-        rows.append({
-            "id":"legacy-"+str(e.get("id","")),
-            "time_utc":e.get("time"),
-            "time_pacific":_pt_text(_iso_dt(e.get("time"))) if e.get("time") else "",
-            "timezone":"America/Vancouver",
-            "category":"LEGACY EVENT",
-            "action":e.get("event",""),
-            "actor":e.get("actor") or "—",
-            "role":e.get("role") or "—",
-            "logger_sn":e.get("logger_sn",""),
-            "name":e.get("name",""),
-            "detail":e.get("detail",""),
-            "source_event_id":e.get("id",""),
-        })
-    rows=sorted(rows,key=lambda r:str(r.get("time_utc","")))
+def get_audit_records(limit=1000,start=None,end=None,logger=None,category=None):
+    """Audit records oldest -> newest, optionally filtered; limit keeps the newest N (None = all)."""
+    rows=[] if category=="LEGACY EVENT" else db_audit(start,end,logger,category)
+    if not category or category=="LEGACY EVENT":
+        # Include legacy alarm/config events (no audit record) so pre-v6.2 history remains visible.
+        for e in db_unaudited_events(start,end,logger):
+            rows.append({
+                "id":"legacy-"+str(e.get("id","")),
+                "time_utc":e.get("time"),
+                "time_pacific":_pt_text(_iso_dt(e.get("time"))) if e.get("time") else "",
+                "timezone":"America/Vancouver",
+                "category":"LEGACY EVENT",
+                "action":e.get("event",""),
+                "actor":e.get("actor") or "—",
+                "role":e.get("role") or "—",
+                "logger_sn":e.get("logger_sn",""),
+                "name":e.get("name",""),
+                "detail":e.get("detail",""),
+                "source_event_id":e.get("id",""),
+            })
+    rows=sorted(rows,key=lambda r:_ts_key(r.get("time_utc")))
     if limit is None:
         return rows
     return rows[-max(1,min(int(limit),5000)):]
@@ -837,15 +964,11 @@ def mark_active_downtime_ack(sn,who,when_utc):
 
 def enforce_audit_retention():
     years=load_audit_config().get("retention_years",3)
-    with event_lock:
-        rows=_read_json(EVENT_FILE,[])
-        _write_json(EVENT_FILE,_prune_list_by_retention(rows,years))
+    db_prune(years)
     with downtime_lock:
         rows=_read_json(DOWNTIME_FILE,[])
         _write_json(DOWNTIME_FILE,_prune_list_by_retention(rows,years))
     with audit_lock:
-        rows=_read_json(AUDIT_FILE,[])
-        _write_json(AUDIT_FILE,_prune_list_by_retention(rows,years))
         rows=_read_json(DEVIATION_FILE,[])
         _write_json(DEVIATION_FILE,_prune_list_by_retention(rows,years))
 
@@ -854,22 +977,26 @@ def create_audit_backup(reason="scheduled",actor="SYSTEM"):
     stamp=now.astimezone(PLANT_TZ).strftime("%Y%m%d_%H%M%S")
     out=BACKUP_DIR/f"PBF_Audit_Backup_{stamp}.zip"
     files=[
-        EVENT_FILE,STATE_FILE,CONFIG_FILE,DOWNTIME_FILE,DOWNTIME_ACTIVE_FILE,
-        REPORT_CONFIG_FILE,REPORT_STATE_FILE,CALIBRATION_FILE,AUDIT_FILE,
+        STATE_FILE,CONFIG_FILE,DOWNTIME_FILE,DOWNTIME_ACTIVE_FILE,
+        REPORT_CONFIG_FILE,REPORT_STATE_FILE,CALIBRATION_FILE,
         AUDIT_CONFIG_FILE,DEVIATION_FILE,NOTIFY_CONFIG_FILE,
     ]
+    # Events and the audit trail are in thermoiq.db; the backup keeps the familiar JSON files.
+    exports={EVENT_FILE.name:db_events(),AUDIT_FILE.name:db_audit()}
     manifest={
         "created_utc":now.isoformat(),
         "created_pacific":now.astimezone(PLANT_TZ).isoformat(),
         "timezone":"America/Vancouver",
-        "version":"6.4.0",
+        "version":"6.5.0",
         "reason":reason,
         "actor":actor,
         "note":"Data/config backup only. Secrets in .env are intentionally excluded.",
-        "files":[p.name for p in files if p.exists()],
+        "files":list(exports)+[p.name for p in files if p.exists()],
     }
     with zipfile.ZipFile(out,"w",zipfile.ZIP_DEFLATED) as z:
         z.writestr("BACKUP_MANIFEST.json",json.dumps(manifest,indent=2))
+        for name,rows in exports.items():
+            z.writestr("data/"+name,json.dumps(rows,indent=2))
         for p in files:
             if p.exists():
                 z.write(p,arcname="data/"+p.name)
@@ -904,10 +1031,9 @@ def audit_backup_status():
     }
 
 def _audit_day_events(sn,start_utc,end_utc):
-    with event_lock:
-        rows=_read_json(EVENT_FILE,[])
+    rows=db_events(start_utc,end_utc,None if sn=="ALL" else sn)
     out=[]
-    for e in rows if isinstance(rows,list) else []:
+    for e in rows:
         if sn!="ALL" and str(e.get("logger_sn",""))!=sn:
             continue
         t=_iso_dt(e.get("time"))
@@ -968,7 +1094,7 @@ async def build_audit_pdf(sn,date_text):
     deviations={str(r.get("episode_id")):r for r in load_deviations()}
 
     dataset={
-        "version":"6.4.0",
+        "version":"6.5.0",
         "date":selected.isoformat(),
         "timezone":"America/Vancouver",
         "logger_serials":serials,
@@ -1229,10 +1355,7 @@ def close_downtime(sn, when_utc, recovery_temp=None, reason="RETURN TO NORMAL"):
 
 def _legacy_downtime_from_events(cutoff_utc=None):
     """Best-effort reconstruction of pre-v6.1 alarm episodes from persistent events."""
-    with event_lock:
-        rows=_read_json(EVENT_FILE,[])
-    if not isinstance(rows,list):
-        return []
+    rows=db_events(end=cutoff_utc)
     open_by={}
     out=[]
     for e in sorted(rows,key=lambda x:str(x.get("time",""))):
@@ -1349,10 +1472,7 @@ def _episode_overlap_minutes(rec,start_utc,end_utc):
     return max(0.0,(hi-lo).total_seconds()/60.0)
 
 def _report_alarm_events(start_utc,end_utc):
-    with event_lock:
-        rows=_read_json(EVENT_FILE,[])
-    if not isinstance(rows,list):
-        return []
+    rows=db_events(start_utc,end_utc)
     keep=[]
     for e in rows:
         sn=str(e.get("logger_sn",""))
@@ -1375,24 +1495,14 @@ def add_event(logger_sn, name, event, reading=None, limit=None, alarm_type=None,
     rec={"id":uuid.uuid4().hex,"time":datetime.now(timezone.utc).isoformat(),"logger_sn":logger_sn,"name":name,
          "event":event,"reading":reading,"limit":limit,"alarm_type":alarm_type,"email":email,"push":push,"detail":detail,
          "actor":actor or "","role":role or ""}
-    with event_lock:
-        rows=_read_json(EVENT_FILE,[])
-        if not isinstance(rows,list): rows=[]
-        rows.append(rec)
-        rows=_prune_list_by_retention(rows)
-        _write_json(EVENT_FILE,rows)
+    db_add_event(rec)
     append_audit_record(event,category=category,actor=actor or "SYSTEM",role=role or "system",
                         logger_sn=logger_sn,name=name,detail=detail,source_event_id=rec["id"],
                         extra={"reading":reading,"limit":limit,"alarm_type":alarm_type,"email":email,"push":push})
     return rec["id"]
 
 def update_event(event_id, **changes):
-    with event_lock:
-        rows=_read_json(EVENT_FILE,[])
-        for r in rows:
-            if r.get("id")==event_id:
-                r.update(changes); break
-        _write_json(EVENT_FILE,rows)
+    db_update_event(event_id,changes)
 
 def get_alarm_state():
     with event_lock: return _read_json(STATE_FILE,{"acked":{}})
@@ -1658,12 +1768,12 @@ LOGGERS={
 "22547310":{"id":"BP2","name":"Bagel Proofer 2","alarm_type":"low","limit":30.0},
 "22212731":{"id":"PLANT","name":"PBF Plant Temperature","model":"MX1101","alarm_type":"monitor","limit":0.0}}
 
-app=FastAPI(title="ThermoIQ - PBF Burnaby Temperature Dashboard v6.4.0 Cloud Edition")
+app=FastAPI(title="ThermoIQ - PBF Burnaby Temperature Dashboard v6.5.0 Cloud Edition")
 
 @app.get("/api/deployment-status")
 def api_deployment_status():
     return {
-        "version":"6.4.0",
+        "version":"6.5.0",
         "edition":"OVH Cloud",
         "deployment_role":DEPLOYMENT_ROLE,
         "automatic_notifications_enabled":NOTIFICATIONS_ENABLED,
@@ -1831,13 +1941,11 @@ async def current():
 async def v501_status():
     """Small diagnostic endpoint for the v5.0.1 communication/alarm panels."""
     cur = await current()
-    with event_lock:
-        events = _read_json(EVENT_FILE, [])
     return {
-        "version": "6.4.0",
+        "version": "6.5.0",
         "logger_count": len(cur.get("devices", [])),
         "loggers": [{"name": d.get("name"), "logger_sn": d.get("logger_sn"), "comm_status": d.get("comm_status"), "age_minutes": d.get("age_minutes")} for d in cur.get("devices", [])],
-        "alarm_event_count": len(events),
+        "alarm_event_count": db_count_events(),
     }
 
 
@@ -2287,25 +2395,12 @@ def _time_window(days=None, date=None):
             return datetime.now(timezone.utc)-timedelta(days=min(n,3700)),None
     return None,None
 
-def _filter_rows(rows, time_key, start, end, logger=None, limit=1000):
-    out=[]
-    for r in rows:
-        if not isinstance(r,dict): continue
-        if logger and str(r.get("logger_sn",""))!=str(logger): continue
-        if start or end:
-            t=_iso_dt(r.get(time_key))
-            if not t or (start and t<start) or (end and t>=end): continue
-        out.append(r)
-    total=len(out)
-    limit=max(1,min(int(limit),5000))
-    return out[-limit:],total
-
 @app.get("/api/alarm-events")
 def alarm_events(limit:int=250, days:str="", date:str="", logger:str=""):
     """Event log. Optional filters: days=N (last N days), date=YYYY-MM-DD (one Pacific day), logger=serial."""
-    with event_lock: rows=_read_json(EVENT_FILE,[])
     start,end=_time_window(days,date)
-    rows,total=_filter_rows(rows if isinstance(rows,list) else [],"time",start,end,logger or None,limit)
+    total=db_count_events(start,end,logger or None)
+    rows=db_events(start,end,logger or None,limit=max(1,min(int(limit),5000)))
     return {"events":rows,"total":total,"shown":len(rows)}
 
 @app.delete("/api/alarm-events")
@@ -2346,7 +2441,7 @@ def audit_status(request: Request):
     now=datetime.now(timezone.utc)
     cfg=load_audit_config()
     return {
-        "version":"6.4.0",
+        "version":"6.5.0",
         "server_utc":now.isoformat(),
         "server_pacific":now.astimezone(PLANT_TZ).isoformat(),
         "timezone":"America/Vancouver",
@@ -2418,12 +2513,9 @@ async def audit_deviation_save(request: Request):
 def audit_trail(limit:int=1000, days:str="", date:str="", logger:str="", category:str=""):
     """Audit trail. Optional filters: days=N, date=YYYY-MM-DD (Pacific), logger=serial, category."""
     start,end=_time_window(days,date)
-    rows=get_audit_records(None)
-    if category:
-        rows=[r for r in rows if str(r.get("category","")).upper()==category.upper()]
-    rows,total=_filter_rows(rows,"time_utc",start,end,logger or None,limit)
-    return {"records":rows,"total":total,"shown":len(rows),
-            "categories":sorted({str(r.get("category","")) for r in get_audit_records(None) if r.get("category")})}
+    rows=get_audit_records(None,start,end,logger or None,category or None)
+    total=len(rows); rows=rows[-max(1,min(int(limit),5000)):]
+    return {"records":rows,"total":total,"shown":len(rows),"categories":db_audit_categories()}
 
 @app.get("/api/audit-trail.csv")
 def audit_trail_csv():
@@ -2599,7 +2691,7 @@ async def build_maintenance_report_csv(hours=24,end_utc=None):
     output=io.StringIO(newline="")
     w=csv.writer(output)
     w.writerow(["PBF RISE BAKING BURNABY - TEMPERATURE ALARM DOWNTIME REPORT"])
-    w.writerow(["Report Version","v6.4.0"])
+    w.writerow(["Report Version","v6.5.0"])
     w.writerow(["Report Window Start (Pacific)",_pt_text(start_utc)])
     w.writerow(["Report Window End (Pacific)",_pt_text(end_utc)])
     w.writerow(["Window Hours",hours])

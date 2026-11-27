@@ -2,7 +2,7 @@
 
 # ThermoIQ: PBF Rise Baking Burnaby Temperature Monitoring
 
-**Current version: v6.4.0 (Cloud Edition)**
+**Current version: v6.5.0 (Cloud Edition)**
 
 A web dashboard that monitors the plant's coolers and proofers through **LI-COR HOBO loggers**. It reads live temperature and humidity from **LI-COR Cloud** and raises alarms when a reading goes past its limit. Alarms are sent by email and text message, to recipients managed on the Settings page. The dashboard also shows trends, exports CSV and PDF reports, and keeps an audit trail with calibration and deviation records.
 
@@ -628,19 +628,19 @@ Every report email is recorded in the event log as **24H MAINTENANCE REPORT EMAI
 
 ## Data storage and backups
 
-There is no database. All state is kept in JSON files in `data/`, in the project root:
+All state is kept in `data/`, in the project root. Since v6.5 the two growing logs (alarm events and the audit trail) are in a small SQLite database, `thermoiq.db`; settings stay in JSON files:
 
 | File | Contents |
 |---|---|
 | `alarm_config.json` | Per-logger limits, names, monitoring flag, weekly schedules |
 | `notification_config.json` | Email and text-message recipients, sender name |
 | `alarm_state.json` | Current alarm and acknowledgement state |
-| `alarm_events.json` | Alarm event log |
+| `thermoiq.db` (+ `-wal`, `-shm`) | SQLite: alarm event log (`events` table) and full audit trail (`audit` table) |
+| `alarm_events.json`, `audit_trail.json` | Before v6.5: the event log and audit trail. Kept read-only after the upgrade (see below) |
 | `downtime_history.json`, `downtime_active.json` | Maintenance downtime records |
 | `maintenance_report_config.json`, `maintenance_report_state.json` | Daily report settings and last-sent state |
 | `calibration_records.json` | Calibration records and offsets per logger |
 | `deviation_records.json` | Alarm deviations and corrective actions |
-| `audit_trail.json` | Full audit trail (alarms, acks, config changes, logins, reports, backups) |
 | `audit_config.json` | Retention and backup settings |
 | `audit_backup_state.json` | Last-backup info |
 | `backups/*.zip` | Daily backups |
@@ -649,6 +649,8 @@ There is no database. All state is kept in JSON files in `data/`, in the project
 - **Retention** of local records can be set to 1, 2 or 3 years (default 3).
 - **Automatic backup:** a ZIP every day at **02:15 Pacific**, keeping the **30** most recent, **only on the instance with `DEPLOYMENT_ROLE=CLOUD-PRIMARY`**. The mini-PC and test copies never back up or apply retention on their own; back them up manually (see below). `.env` is **never** included in backups.
 - **Timestamps** are stored in UTC and shown in `America/Vancouver` time.
+- **Upgrade to v6.5:** on start-up the app copies `alarm_events.json` and `audit_trail.json` into `thermoiq.db` (records already there are skipped, so this is safe to repeat). The JSON files are not changed or written to again, so rolling back to v6.4 still shows history up to the upgrade; anything recorded after the upgrade is only in the database.
+- **Backups** still contain `alarm_events.json` and `audit_trail.json`: they are exported from the database when the ZIP is made, so the backup format is unchanged.
 - Deleting events from the dashboard is disabled, to keep the audit trail intact.
 
 ### How to back up from the dashboard
@@ -836,6 +838,7 @@ Version-specific fixes are documented in [docs/release-notes/](docs/release-note
 | v5.3 | Admin password changes, cache fix, weekday/24 h scheduler, calibration and roles, plant logger |
 | v6.0 | Cloud edition (Docker/Caddy), username/password rules, auth fixes |
 | v6.1 | Maintenance downtime report, 7-day trend download, calendar history export |
+| **v6.5.0** | Event log and audit trail moved to SQLite (faster filters), buildx on server |
 | **v6.4.0** | Same header on all pages, Trends compare and custom dates, big screen mode, phone fixes, HTTPS-only login cookie |
 | **v6.3.1** | Alarm Reliability |
 | **v6.3.0** | User logins and role rights, collapsible settings, event/audit date filters, trends logger picker |

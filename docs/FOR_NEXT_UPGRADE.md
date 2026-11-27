@@ -44,8 +44,8 @@ Items marked **(you)** are settings or commands you can do yourself without a re
 
 ## F. Housekeeping
 - [ ] **U28 — Keep the automated tests in the project** (`tests/`) and run them before each release.
-- [ ] **U29 — Install `docker buildx` on the server.** This removes the deploy warning and speeds up builds.
-- [ ] **U30 — Move records from JSON files to SQLite.** Do it before history grows past about a year, because the files slow down as they grow.
+- [x] **U29 — Install `docker buildx` on the server.** This removes the deploy warning and speeds up builds.
+- [x] **U30 — Move records from JSON files to SQLite.** Do it before history grows past about a year, because the files slow down as they grow.
 
 ---
 **Suggested next release (v6.4):** U1, U2, U8, U9, U11, U16, U22, U23 — plus U3–U7 done by you.
