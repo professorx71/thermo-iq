@@ -183,6 +183,10 @@ async function loadConfig(){
     $("reportTime").value=x.report_config.time||"08:00";
     $("reportRecipient").value=x.report_config.recipient||"";
     $("reportHours").value=String(x.report_config.hours||24);
+    $("reportWeekly").value=x.report_config.weekly_enabled===false?"off":"on";
+    $("reportMonthly").value=x.report_config.monthly_enabled===false?"off":"on";
+    $("calReminders").value=x.report_config.calibration_reminders===false?"off":"on";
+    $("calDays").value=String(x.report_config.calibration_days||14);
   }
   if(x.notification_config)fillNotifications(x.notification_config);
   const visibleDevices=can("change_limits") ? x.devices : x.devices.filter(d=>d.alarm_type!=="monitor");
@@ -322,22 +326,28 @@ async function saveReportConfig(){
     enabled:$("reportEnabled").value==="on",
     time:$("reportTime").value||"08:00",
     recipient:$("reportRecipient").value.split(/[\s,;]+/).filter(Boolean),
-    hours:Number($("reportHours").value||24)
+    hours:Number($("reportHours").value||24),
+    weekly_enabled:$("reportWeekly").value==="on",
+    monthly_enabled:$("reportMonthly").value==="on",
+    calibration_reminders:$("calReminders").value==="on",
+    calibration_days:Number($("calDays").value||14)
   };
   msg.textContent="Saving…";
   const r=await fetch("/api/admin/report-config",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(payload)});
   const x=await r.json().catch(()=>({}));
   if(!r.ok){msg.innerHTML='<span class="bad">'+(x.detail||"Unable to save report settings")+'</span>';return;}
-  msg.innerHTML='<span class="good">Daily report saved. Next automatic email follows the Pacific Time schedule.</span>';
+  msg.innerHTML='<span class="good">Report settings saved. Automatic emails follow the Pacific Time schedule.</span>';
 }
 
-async function sendReportNow(){
+async function sendReportNow(kind){
+  kind=kind||"daily";
   const msg=$("reportSendMsg");
-  msg.textContent="Building 24-hour report and sending email…";
-  const r=await fetch("/api/admin/send-maintenance-report",{method:"POST"});
+  msg.textContent={daily:"Building the daily report and sending email…",weekly:"Building last week's QA workbook and sending email…",
+    monthly:"Building last month's QA workbook (up to a minute) and sending email…",calibration:"Sending calibration reminder…"}[kind];
+  const r=await fetch("/api/admin/send-maintenance-report",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({kind})});
   const x=await r.json().catch(()=>({}));
-  if(!r.ok){msg.innerHTML='<span class="bad">'+(x.detail||"Report email failed")+'</span>';return;}
-  msg.innerHTML='<span class="good">Report emailed to '+x.recipient+'.</span>';
+  if(!r.ok){msg.innerHTML='<span class="bad">'+escapeHtml(x.detail||"Report email failed")+'</span>';return;}
+  msg.innerHTML='<span class="good">'+(kind==="calibration"?"Calibration reminder":"Report")+' emailed to '+escapeHtml(x.recipient)+'.</span>';
 }
 
 // ---- Alarm notifications: email + text message (Admin only) ----

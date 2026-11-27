@@ -504,6 +504,7 @@ def save_runtime_cfg(sn, *, limit=None, monitoring_enabled=None, mode=None,
         cfg=_read_json(CONFIG_FILE,{})
         if not isinstance(cfg,dict): cfg={}
         row=cfg.setdefault(sn,{})
+        before=(row.get("limit"),float(row.get("temperature_offset",0.0) or 0.0))
         if limit is not None: row["limit"]=float(limit)
         if monitoring_enabled is not None: row["monitoring_enabled"]=bool(monitoring_enabled)
         if mode is not None: row["mode"]=str(mode)
@@ -521,7 +522,31 @@ def save_runtime_cfg(sn, *, limit=None, monitoring_enabled=None, mode=None,
         row["updated_at"]=datetime.now(timezone.utc).isoformat()
         row["updated_by"]=updated_by
         _write_json(CONFIG_FILE,cfg)
+        _offset_cache["at"]=0.0
+        changed=before!=(row.get("limit"),float(row.get("temperature_offset",0.0) or 0.0))
+    if changed:
+        db_clear_day_stats()   # stored daily stats used the old limit / offset
     return get_runtime_cfg(sn)
+
+_offset_cache={"at":0.0,"offsets":{}}
+
+def _calibration_offsets(sn):
+    """(temperature, humidity) offsets for a logger. Cached for 2 seconds (cleared on save), because
+    reports calibrate hundreds of thousands of readings and each settings read is a file read."""
+    import time as _t
+    now=_t.monotonic()
+    if now-_offset_cache["at"]>2.0:
+        saved=load_alarm_config()
+        offs={}
+        for key,row in (saved.items() if isinstance(saved,dict) else []):
+            if not isinstance(row,dict): continue
+            try: t=float(row.get("temperature_offset",0.0))
+            except Exception: t=0.0
+            try: h=float(row.get("humidity_offset",0.0))
+            except Exception: h=0.0
+            offs[str(key)]={"temperature_offset":t,"humidity_offset":h}
+        _offset_cache["offsets"]=offs; _offset_cache["at"]=now
+    return _offset_cache["offsets"].get(str(sn),{"temperature_offset":0.0,"humidity_offset":0.0})
 
 def calibrated_value(sn, measurement_type, value):
     """Apply the saved per-logger calibration offset to a LI-COR reading."""
@@ -531,7 +556,7 @@ def calibrated_value(sn, measurement_type, value):
         v=float(value)
     except Exception:
         return value
-    cfg=get_runtime_cfg(str(sn)) if str(sn) in LOGGERS else {}
+    cfg=_calibration_offsets(str(sn)) if str(sn) in LOGGERS else {}
     typ=str(measurement_type or "").lower()
     if typ=="temperature":
         return v + float(cfg.get("temperature_offset",0.0))
@@ -602,6 +627,9 @@ def db():
                     source_event_id TEXT, data TEXT NOT NULL);
                 CREATE INDEX IF NOT EXISTS audit_ts ON audit(ts);
                 CREATE INDEX IF NOT EXISTS audit_source ON audit(source_event_id);
+                CREATE TABLE IF NOT EXISTS temp_day_stats(
+                    day TEXT NOT NULL, logger_sn TEXT NOT NULL, min REAL, max REAL, sum REAL, n INTEGER, out INTEGER,
+                    PRIMARY KEY(day, logger_sn));
             """)
             _db=conn
             _import_json_history(conn)
@@ -979,7 +1007,7 @@ def create_audit_backup(reason="scheduled",actor="SYSTEM"):
     files=[
         STATE_FILE,CONFIG_FILE,DOWNTIME_FILE,DOWNTIME_ACTIVE_FILE,
         REPORT_CONFIG_FILE,REPORT_STATE_FILE,CALIBRATION_FILE,
-        AUDIT_CONFIG_FILE,DEVIATION_FILE,NOTIFY_CONFIG_FILE,
+        AUDIT_CONFIG_FILE,DEVIATION_FILE,NOTIFY_CONFIG_FILE,CAL_REMINDER_STATE_FILE,
     ]
     # Events and the audit trail are in thermoiq.db; the backup keeps the familiar JSON files.
     exports={EVENT_FILE.name:db_events(),AUDIT_FILE.name:db_audit()}
@@ -987,7 +1015,7 @@ def create_audit_backup(reason="scheduled",actor="SYSTEM"):
         "created_utc":now.isoformat(),
         "created_pacific":now.astimezone(PLANT_TZ).isoformat(),
         "timezone":"America/Vancouver",
-        "version":"6.5.0",
+        "version":"6.6.0",
         "reason":reason,
         "actor":actor,
         "note":"Data/config backup only. Secrets in .env are intentionally excluded.",
@@ -1094,7 +1122,7 @@ async def build_audit_pdf(sn,date_text):
     deviations={str(r.get("episode_id")):r for r in load_deviations()}
 
     dataset={
-        "version":"6.5.0",
+        "version":"6.6.0",
         "date":selected.isoformat(),
         "timezone":"America/Vancouver",
         "logger_serials":serials,
@@ -1423,6 +1451,10 @@ def load_report_config():
         "time":"08:00",
         "recipient":ALERT_EMAIL,
         "hours":24,
+        "weekly_enabled":True,
+        "monthly_enabled":True,
+        "calibration_reminders":True,
+        "calibration_days":14,
     }
     with report_lock:
         saved=_read_json(REPORT_CONFIG_FILE,{})
@@ -1436,9 +1468,15 @@ def load_report_config():
         cfg["hours"]=max(1,min(168,int(cfg.get("hours",24))))
     except Exception:
         cfg["hours"]=24
+    for k in ("weekly_enabled","monthly_enabled","calibration_reminders"):
+        cfg[k]=bool(cfg.get(k,True))
+    try:
+        cfg["calibration_days"]=max(1,min(90,int(cfg.get("calibration_days",14))))
+    except Exception:
+        cfg["calibration_days"]=14
     return cfg
 
-def save_report_config(enabled,time_text,recipient,hours=24,updated_by="admin"):
+def save_report_config(enabled,time_text,recipient,hours=24,updated_by="admin",extra=None):
     time_text=_valid_hhmm(time_text,"")
     if not time_text:
         raise HTTPException(status_code=400,detail="Daily report time must use HH:MM")
@@ -1458,6 +1496,13 @@ def save_report_config(enabled,time_text,recipient,hours=24,updated_by="admin"):
         "updated_at":datetime.now(timezone.utc).isoformat(),
         "updated_by":updated_by,
     }
+    old=load_report_config(); extra=extra or {}
+    for k in ("weekly_enabled","monthly_enabled","calibration_reminders"):
+        cfg[k]=bool(extra.get(k,old.get(k,True)))
+    try:
+        cfg["calibration_days"]=max(1,min(90,int(extra.get("calibration_days",old.get("calibration_days",14)))))
+    except Exception:
+        raise HTTPException(status_code=400,detail="Calibration reminder days must be a number")
     with report_lock:
         _write_json(REPORT_CONFIG_FILE,cfg)
     return cfg
@@ -1768,12 +1813,12 @@ LOGGERS={
 "22547310":{"id":"BP2","name":"Bagel Proofer 2","alarm_type":"low","limit":30.0},
 "22212731":{"id":"PLANT","name":"PBF Plant Temperature","model":"MX1101","alarm_type":"monitor","limit":0.0}}
 
-app=FastAPI(title="ThermoIQ - PBF Burnaby Temperature Dashboard v6.5.0 Cloud Edition")
+app=FastAPI(title="ThermoIQ - PBF Burnaby Temperature Dashboard v6.6.0 Cloud Edition")
 
 @app.get("/api/deployment-status")
 def api_deployment_status():
     return {
-        "version":"6.5.0",
+        "version":"6.6.0",
         "edition":"OVH Cloud",
         "deployment_role":DEPLOYMENT_ROLE,
         "automatic_notifications_enabled":NOTIFICATIONS_ENABLED,
@@ -1942,7 +1987,7 @@ async def v501_status():
     """Small diagnostic endpoint for the v5.0.1 communication/alarm panels."""
     cur = await current()
     return {
-        "version": "6.5.0",
+        "version": "6.6.0",
         "logger_count": len(cur.get("devices", [])),
         "loggers": [{"name": d.get("name"), "logger_sn": d.get("logger_sn"), "comm_status": d.get("comm_status"), "age_minutes": d.get("age_minutes")} for d in cur.get("devices", [])],
         "alarm_event_count": db_count_events(),
@@ -2381,8 +2426,13 @@ async def admin_update_config(sn: str, request: Request):
 
     return {"ok":True,"device":new}
 
-def _time_window(days=None, date=None):
-    """(start_utc, end_utc) for "last N days" or one Pacific calendar day (YYYY-MM-DD); (None, None) = all."""
+def _time_window(days=None, date=None, start=None, end=None):
+    """(start_utc, end_utc) for "last N days", one Pacific calendar day (YYYY-MM-DD), or a Pacific
+    date range start..end (both days included); (None, None) = all."""
+    if start or end:
+        a=_pt_date(start or end,"start"); b=_pt_date(end or start,"end")
+        if b<a: raise HTTPException(status_code=400,detail="End date is before the start date")
+        return _pt_midnight(a),_pt_midnight(b+timedelta(days=1))
     if date:
         try: d=datetime.strptime(str(date),"%Y-%m-%d")
         except ValueError: raise HTTPException(status_code=400,detail="date must be YYYY-MM-DD")
@@ -2396,9 +2446,10 @@ def _time_window(days=None, date=None):
     return None,None
 
 @app.get("/api/alarm-events")
-def alarm_events(limit:int=250, days:str="", date:str="", logger:str=""):
-    """Event log. Optional filters: days=N (last N days), date=YYYY-MM-DD (one Pacific day), logger=serial."""
-    start,end=_time_window(days,date)
+def alarm_events(limit:int=250, days:str="", date:str="", logger:str="", start:str="", end:str=""):
+    """Event log. Optional filters: days=N (last N days), date=YYYY-MM-DD (one Pacific day),
+    start/end=YYYY-MM-DD (Pacific date range), logger=serial."""
+    start,end=_time_window(days,date,start,end)
     total=db_count_events(start,end,logger or None)
     rows=db_events(start,end,logger or None,limit=max(1,min(int(limit),5000)))
     return {"events":rows,"total":total,"shown":len(rows)}
@@ -2441,7 +2492,7 @@ def audit_status(request: Request):
     now=datetime.now(timezone.utc)
     cfg=load_audit_config()
     return {
-        "version":"6.5.0",
+        "version":"6.6.0",
         "server_utc":now.isoformat(),
         "server_pacific":now.astimezone(PLANT_TZ).isoformat(),
         "timezone":"America/Vancouver",
@@ -2510,23 +2561,24 @@ async def audit_deviation_save(request: Request):
     return {"ok":True,"record":rec}
 
 @app.get("/api/audit-trail")
-def audit_trail(limit:int=1000, days:str="", date:str="", logger:str="", category:str=""):
-    """Audit trail. Optional filters: days=N, date=YYYY-MM-DD (Pacific), logger=serial, category."""
-    start,end=_time_window(days,date)
+def audit_trail(limit:int=1000, days:str="", date:str="", logger:str="", category:str="", start:str="", end:str=""):
+    """Audit trail. Optional filters: days=N, date=YYYY-MM-DD or start/end (Pacific), logger=serial, category."""
+    start,end=_time_window(days,date,start,end)
     rows=get_audit_records(None,start,end,logger or None,category or None)
     total=len(rows); rows=rows[-max(1,min(int(limit),5000)):]
     return {"records":rows,"total":total,"shown":len(rows),"categories":db_audit_categories()}
 
 @app.get("/api/audit-trail.csv")
-def audit_trail_csv():
+def audit_trail_csv(days:str="",date:str="",start:str="",end:str="",logger:str="",category:str=""):
+    """Audit trail CSV; with no filters it contains every record still inside the retention period."""
     output=io.StringIO(newline="")
     w=csv.writer(output)
     w.writerow(["Time UTC","Time Pacific","Category","Action","Actor","Role","Logger","Equipment","Detail"])
-    for r in get_audit_records(5000):
+    for r in _audit_rows_filtered(days,date,start,end,logger,category):
         w.writerow([r.get("time_utc",""),r.get("time_pacific",""),r.get("category",""),r.get("action",""),
                     r.get("actor",""),r.get("role",""),r.get("logger_sn",""),r.get("name",""),r.get("detail","")])
     return Response(content=output.getvalue().encode("utf-8-sig"),media_type="text/csv; charset=utf-8",
-                    headers={"Content-Disposition":'attachment; filename="PBF_CMS_Audit_Trail.csv"'})
+                    headers={"Content-Disposition":f'attachment; filename="PBF_CMS_Audit_Trail_{_window_label(days,date,start,end)}.csv"'})
 
 @app.get("/api/audit-report.pdf")
 async def audit_report_pdf(logger_sn:str,date:str):
@@ -2691,7 +2743,7 @@ async def build_maintenance_report_csv(hours=24,end_utc=None):
     output=io.StringIO(newline="")
     w=csv.writer(output)
     w.writerow(["PBF RISE BAKING BURNABY - TEMPERATURE ALARM DOWNTIME REPORT"])
-    w.writerow(["Report Version","v6.5.0"])
+    w.writerow(["Report Version","v6.6.0"])
     w.writerow(["Report Window Start (Pacific)",_pt_text(start_utc)])
     w.writerow(["Report Window End (Pacific)",_pt_text(end_utc)])
     w.writerow(["Window Hours",hours])
@@ -2905,6 +2957,30 @@ def build_all_logger_temperature_xlsx(temp_rows,start_utc,end_utc):
             ws.cell(ws.max_row,3).number_format="0.00"; ws.cell(ws.max_row,4).number_format="0.00"
         if alarm_type in ("high","low") and limit is not None:
             ws.cell(4,3,f"{out_count} out-of-limit reading(s)").font=alarm_font if out_count else bold
+        # Min / avg / max per hour (per day for windows over 48 hours), with a line chart.
+        daily_mode=(end_utc-start_utc)>timedelta(hours=48)
+        buckets={}; labels={}
+        for t,v in by_sn[sn].items():
+            if v.get("temp") is None: continue
+            pt=t.astimezone(PLANT_TZ)
+            k=pt.strftime("%Y-%m-%d" if daily_mode else "%Y-%m-%d %H")
+            labels[k]=pt.strftime("%Y-%m-%d" if daily_mode else "%a %H:00")   # short chart labels: "Thu 15:00"
+            buckets.setdefault(k,[]).append(v["temp"])
+        if buckets:
+            has_lim=alarm_type in ("high","low") and limit is not None
+            heads=["Day (Pacific)" if daily_mode else "Hour (Pacific)","Min (C)","Avg (C)","Max (C)"]+(["Limit (C)"] if has_lim else [])
+            for i,h in enumerate(heads):
+                cell=ws.cell(head_row,6+i,h); cell.font=head_font; cell.fill=head_fill; cell.alignment=Alignment(horizontal="center")
+            r=head_row
+            for k in sorted(buckets):
+                vals=buckets[k]; r+=1
+                ws.cell(r,6,labels[k]); ws.cell(r,7,round(min(vals),2)); ws.cell(r,8,round(sum(vals)/len(vals),2)); ws.cell(r,9,round(max(vals),2))
+                if has_lim: ws.cell(r,10,float(limit))
+                for c in range(7,11): ws.cell(r,c).number_format="0.00"
+            _add_minmax_chart(ws,head_row,r,6,7,10 if has_lim else None,f"L{head_row}",
+                              f"{name} - {'daily' if daily_mode else 'hourly'} min / avg / max",
+                              "Day (Pacific)" if daily_mode else "Hour (Pacific)")
+            for col,width in zip("FGHIJ",(18,10,10,10,10)): ws.column_dimensions[col].width=width
         ws.freeze_panes=ws.cell(head_row+1,1)
         ws.auto_filter.ref=f"A{head_row}:D{ws.max_row}"
         for col,width in zip("ABCD",(22,16,17,16)): ws.column_dimensions[col].width=width
@@ -2918,13 +2994,15 @@ async def send_maintenance_report(hours=None,recipient=None,manual=False):
     report_bytes,report_name,temp_rows,api_error,start_utc,end_utc=await build_maintenance_report_csv(hours)
     temp_bytes=build_all_logger_temperature_xlsx(temp_rows,start_utc,end_utc)
     temp_name=f"PBF_All_Logger_Temperature_History_{hours}h_{end_utc.astimezone(PLANT_TZ).strftime('%Y%m%d_%H%M')}.xlsx"
+    summary_lines,_=build_report_summary(start_utc,end_utc,_out_of_limit_counts(temp_rows),api_error,cfg.get("calibration_days",14))
     body=(
         "PBF RISE BAKING BURNABY - TEMPERATURE MAINTENANCE REPORT\n\n"
         f"Reporting window: {_pt_text(start_utc)} to {_pt_text(end_utc)}\n"
-        f"Duration: {hours} hours\n"
+        f"Duration: {hours} hours\n\n"
+        +"\n".join(summary_lines)+"\n\n"
         "Attached:\n"
         "1. Temperature alarm downtime report: daily event count, downtime duration, availability, and alarm audit trail.\n"
-        "2. Temperature/humidity history workbook (Excel): one worksheet per logger, out-of-limit readings in red.\n\n"
+        "2. Temperature/humidity history workbook (Excel): one worksheet per logger, out-of-limit readings in red, hourly min/avg/max chart.\n\n"
         "Purpose: maintenance performance validation and temperature downtime history."
     )
     if api_error:
@@ -2978,6 +3056,668 @@ async def maybe_send_daily_maintenance_report():
             _write_json(REPORT_STATE_FILE,state)
         print("Daily maintenance report email error:",repr(e))
 
+# ---------------------------------------------------------------- v6.6 reports (U16-U21)
+# Summary at the top of report emails, weekly/monthly QA workbooks with daily min/avg/max
+# charts, filtered Excel downloads for the event log and audit trail, calibration-due emails.
+CAL_REMINDER_STATE_FILE=DATA_DIR/"calibration_reminder_state.json"
+PERIOD_LABELS={"last-week":"Weekly","this-week":"Weekly (to date)","last-month":"Monthly","this-month":"Monthly (to date)"}
+EVENT_KINDS={
+    "ALARM":r"TEMPERATURE ALARM|REMINDER","ACK":r"ACKNOWLEDGED","NORMAL":r"RETURN TO NORMAL",
+    "CHANGE":r"CHANGED|ENABLED|DISABLED|ADDED|REMOVED|RESET|SUSPENDED","LOGIN":r"LOGIN|LOGOUT|LOCKED"}
+
+def _filter_kind(rows,kind):
+    if not kind:
+        return rows
+    rx=EVENT_KINDS.get(str(kind).upper())
+    if not rx:
+        raise HTTPException(status_code=400,detail="Unknown event type")
+    return [e for e in rows if re.search(rx,str(e.get("event","")).upper())]
+
+def _pt_date(text,field="date"):
+    try:
+        return datetime.strptime(str(text).strip(),"%Y-%m-%d").date()
+    except ValueError:
+        raise HTTPException(status_code=400,detail=f"{field} must be YYYY-MM-DD")
+
+def _pt_midnight(day):
+    return datetime.combine(day,datetime.min.time(),tzinfo=PLANT_TZ).astimezone(timezone.utc)
+
+def _window_label(days="",date="",start="",end=""):
+    """Short file-name label for a filter window."""
+    if start or end:
+        a,b=start or end,end or start
+        return a if a==b else f"{a}_to_{b}"
+    if date:
+        return str(date)
+    if days:
+        return f"Last_{days}_days"
+    return "All"
+
+def _is_out(alarm_type,limit,temp):
+    if temp is None or limit is None:
+        return False
+    try:
+        lim=float(limit)
+    except (TypeError,ValueError):
+        return False
+    return (alarm_type=="high" and temp>lim) or (alarm_type=="low" and temp<lim)
+
+def _alarm_loggers():
+    return [sn for sn in LOGGERS if get_runtime_cfg(sn).get("alarm_type") in ("high","low")]
+
+def _xl(value):
+    """Cell-safe value: text that starts with = is not turned into a formula; control characters removed."""
+    if isinstance(value,str):
+        from openpyxl.cell.cell import ILLEGAL_CHARACTERS_RE
+        value=ILLEGAL_CHARACTERS_RE.sub("",value)
+        if value[:1] in ("=","+","@") or (value[:1]=="-" and not re.fullmatch(r"-[\d.]+",value)):
+            value=" "+value
+    return value
+
+def _xl_styles():
+    from openpyxl.styles import Font, PatternFill, Alignment
+    return {
+        "title":Font(bold=True,size=13),"bold":Font(bold=True),
+        "head_font":Font(bold=True,color="FFFFFF"),"head_fill":PatternFill("solid",fgColor="1F3A4D"),
+        "bad_fill":PatternFill("solid",fgColor="F8CBAD"),"bad_font":Font(bold=True,color="9C0006"),
+        "center":Alignment(horizontal="center"),"wrap":Alignment(vertical="top",wrap_text=True),
+    }
+
+def _xl_header(ws,row,headers,col=1):
+    st=_xl_styles()
+    for i,h in enumerate(headers):
+        cell=ws.cell(row,col+i,h); cell.font=st["head_font"]; cell.fill=st["head_fill"]; cell.alignment=st["center"]
+
+def _table_xlsx(title,info,headers,rows,widths,sheet="Records",wrap_cols=()):
+    """One-sheet workbook: title, label/value lines, then a filterable table."""
+    from openpyxl import Workbook
+    from openpyxl.utils import get_column_letter
+    st=_xl_styles()
+    wb=Workbook(); ws=wb.active; ws.title=sheet
+    ws.append([title]); ws["A1"].font=st["title"]
+    for k,v in info:
+        ws.append([k,_xl(v)]); ws.cell(ws.max_row,1).font=st["bold"]
+    ws.append([])
+    head=ws.max_row+1
+    _xl_header(ws,head,headers)
+    for r in rows:
+        ws.append([_xl(v) for v in r])
+    if not rows:
+        ws.append(["No records in this period."])
+    ws.freeze_panes=ws.cell(head+1,1)
+    if rows:
+        ws.auto_filter.ref=f"A{head}:{get_column_letter(len(headers))}{ws.max_row}"
+        for c in wrap_cols:
+            for r in range(head+1,ws.max_row+1):
+                ws.cell(r,c).alignment=st["wrap"]
+    for i,w in enumerate(widths,1):
+        ws.column_dimensions[get_column_letter(i)].width=w
+    buf=io.BytesIO(); wb.save(buf)
+    return buf.getvalue()
+
+def _xlsx_response(content,filename):
+    return Response(content=content,media_type=XLSX_MIME,
+                    headers={"Content-Disposition":f'attachment; filename="{filename}"'})
+
+def _add_minmax_chart(ws,head_row,last_row,cat_col,min_col,limit_col,anchor,title,x_title):
+    """Line chart of the Min / Avg / Max columns (min_col, +1, +2) and, if given, the limit column."""
+    from openpyxl.chart import LineChart, Reference
+    if last_row<=head_row:
+        return
+    ch=LineChart()
+    ch.title=title+" (°C)"
+    ch.height=9; ch.width=24; ch.legend.position="r"; ch.legend.overlay=False
+    ch.x_axis.delete=False; ch.y_axis.delete=False   # openpyxl 3.1 hides axes unless told otherwise
+    ch.y_axis.number_format="0"
+    cols=[min_col,min_col+1,min_col+2]+([limit_col] if limit_col else [])
+    for c in cols:
+        ch.add_data(Reference(ws,min_col=c,min_row=head_row,max_row=last_row),titles_from_data=True)
+    ch.set_categories(Reference(ws,min_col=cat_col,min_row=head_row+1,max_row=last_row))
+    for s,color in zip(ch.series,("2F80ED","27AE60","EB5757","7F7F7F")):
+        s.smooth=False
+        s.graphicalProperties.line.solidFill=color
+        s.graphicalProperties.line.width=22000
+    if limit_col:
+        ch.series[-1].graphicalProperties.line.dashStyle="dash"
+    ws.add_chart(ch,anchor)
+
+def _fmt_minutes(m):
+    m=float(m or 0)
+    return f"{m:,.0f} min ({m/60:.1f} h)" if m>=60 else f"{m:,.0f} min"
+
+def _alarm_minutes(start_utc,end_utc,episodes=None):
+    """Per logger: minutes in alarm inside the window, episodes touching it, still open."""
+    episodes=get_all_downtime_records() if episodes is None else episodes
+    out={}
+    for r in episodes:
+        m=_episode_overlap_minutes(r,start_utc,end_utc)
+        if m<=0:
+            continue
+        d=out.setdefault(str(r.get("logger_sn","")),{"minutes":0.0,"episodes":0,"open":False})
+        d["minutes"]+=m; d["episodes"]+=1
+        if str(r.get("status","")).upper()=="OPEN":
+            d["open"]=True
+    return out
+
+def calibration_status(today=None):
+    """Latest calibration and next due date for every logger."""
+    today=today or datetime.now(timezone.utc).astimezone(PLANT_TZ).date()
+    out=[]
+    for sn in LOGGERS:
+        rec=latest_calibration(sn) or {}
+        due=str(rec.get("next_due_date") or "")
+        days=None
+        if due:
+            try:
+                days=(datetime.strptime(due,"%Y-%m-%d").date()-today).days
+            except ValueError:
+                due=""
+        out.append({"logger_sn":sn,"name":get_runtime_cfg(sn)["name"],"last":rec.get("calibration_date",""),
+                    "due":due,"days_left":days})
+    return out
+
+def _due_text(c):
+    d=c["days_left"]
+    if d is None:
+        return "no due date recorded"
+    if d<0:
+        return f"OVERDUE by {-d} day(s) (due {c['due']})"
+    if d==0:
+        return f"due TODAY ({c['due']})"
+    return f"due in {d} day(s) ({c['due']})"
+
+def build_report_summary(start_utc,end_utc,out_readings=None,api_error="",warn_days=14):
+    """Plain-text summary for the top of report emails, plus the numbers behind it."""
+    episodes=get_all_downtime_records()
+    am=_alarm_minutes(start_utc,end_utc,episodes)
+    alarm_sns=_alarm_loggers()
+    bad=[]
+    for sn in alarm_sns:
+        a=am.get(sn,{}); n=(out_readings or {}).get(sn,0)
+        if a.get("minutes",0)>0 or n:
+            bad.append((sn,a,n))
+    bad.sort(key=lambda x:-x[1].get("minutes",0))
+    lines=["SUMMARY",f"Loggers out of limit: {len(bad)} of {len(alarm_sns)}"]
+    for sn,a,n in bad:
+        bits=[_fmt_minutes(a.get("minutes",0))+" in alarm"]
+        if a.get("episodes"):
+            bits.append(f"{a['episodes']} alarm episode(s)")
+        if out_readings is not None:
+            bits.append(f"{n} reading(s) beyond the limit")
+        if a.get("open"):
+            bits.append("STILL IN ALARM")
+        lines.append(f"  - {get_runtime_cfg(sn)['name']}: "+", ".join(bits))
+    total=sum(a.get("minutes",0) for sn,a in am.items() if sn in alarm_sns)
+    lines.append("Total time out of limit: "+_fmt_minutes(total))
+
+    by_id={str(r.get("id")):r for r in episodes}
+    devs=load_deviations()
+    open_devs=[d for d in devs if str(d.get("status","")).upper()=="OPEN"]
+    lines.append(f"Open deviations: {len(open_devs)}")
+    for d in open_devs[:10]:
+        ep=by_id.get(str(d.get("episode_id")),{})
+        when=_pt_text(_iso_dt(ep.get("start_utc"))) if ep.get("start_utc") else ""
+        lines.append(f"  - {d.get('name') or d.get('logger_sn')}: alarm {when}; responsible {d.get('responsible_person') or '—'}")
+    if len(open_devs)>10:
+        lines.append(f"  - … and {len(open_devs)-10} more (Audit page)")
+    with_dev={str(d.get("episode_id")) for d in devs}
+    no_dev=[r for r in episodes if _episode_overlap_minutes(r,start_utc,end_utc)>0
+            and str(r.get("logger_sn")) in alarm_sns and str(r.get("id")) not in with_dev]
+    lines.append(f"Alarm episodes in this period with no deviation record: {len(no_dev)}")
+
+    cal=calibration_status()
+    due=[c for c in cal if c["days_left"] is not None and c["days_left"]<=warn_days]
+    if due:
+        lines.append(f"Calibration due within {warn_days} days or overdue: {len(due)}")
+        for c in sorted(due,key=lambda c:c["days_left"]):
+            lines.append(f"  - {c['name']}: {_due_text(c)}")
+    else:
+        missing=sum(1 for c in cal if not c["due"])
+        lines.append("Calibration: nothing due in the next %d days%s" % (
+            warn_days,f" ({missing} logger(s) have no due date recorded)" if missing else ""))
+    if api_error:
+        lines.append("NOTE: LI-COR readings were incomplete for this report; reading counts may be low.")
+    return lines,{"alarm":am,"open_deviations":open_devs,"no_deviation":no_dev,"calibration":cal}
+
+def _out_of_limit_counts(temp_rows):
+    cfgs={sn:get_runtime_cfg(sn) for sn in LOGGERS}
+    out={}
+    for q in temp_rows:
+        sn=str(q.get("logger_sn",""))
+        if sn not in cfgs or str(q.get("sensor_measurement_type","")).lower()!="temperature":
+            continue
+        try:
+            v=float(q.get("value"))
+        except (TypeError,ValueError):
+            continue
+        if _is_out(cfgs[sn].get("alarm_type"),cfgs[sn].get("limit"),v):
+            out[sn]=out.get(sn,0)+1
+    return out
+
+def db_day_stats(first_day,last_day):
+    """Stored daily stats {(day, sn): {...}} and the set of days that are complete in the store."""
+    with db_lock:
+        rows=db().execute("SELECT day,logger_sn,min,max,sum,n,out FROM temp_day_stats WHERE day>=? AND day<=?",
+                          (first_day.isoformat(),last_day.isoformat())).fetchall()
+    stats={}; done=set()
+    for day,sn,mn,mx,sm,n,out in rows:
+        if sn=="":
+            done.add(day)          # marker row: this day was fetched completely
+        else:
+            stats[(day,sn)]={"min":mn,"max":mx,"sum":sm,"n":n,"out":out}
+    return {k:v for k,v in stats.items() if k[0] in done},done
+
+def db_save_day_stats(day,stats):
+    with db_lock:
+        db().execute("DELETE FROM temp_day_stats WHERE day=?",(day,))
+        db().executemany("INSERT INTO temp_day_stats VALUES(?,?,?,?,?,?,?)",
+                         [(day,sn,v["min"],v["max"],v["sum"],v["n"],v["out"]) for (d,sn),v in stats.items() if d==day]
+                         +[(day,"",None,None,None,0,0)])
+        db().commit()
+
+def db_clear_day_stats():
+    with db_lock:
+        db().execute("DELETE FROM temp_day_stats"); db().commit()
+
+async def collect_daily_temperature_stats(start_utc,end_utc,parallel=4):
+    """Daily min/avg/max per logger. Finished Pacific days are stored in thermoiq.db after the first fetch,
+    so weekly/monthly reports only download days not seen before (LI-COR answers about one logger-day per 2 s).
+    Each day is one request for all loggers and only counts readings inside that day."""
+    cfgs={sn:get_runtime_cfg(sn) for sn in LOGGERS}
+    now=datetime.now(timezone.utc)
+    first=start_utc.astimezone(PLANT_TZ).date(); last=(end_utc-timedelta(microseconds=1)).astimezone(PLANT_TZ).date()
+    daily,done=db_day_stats(first,last)
+    todo=[]
+    for i in range((last-first).days+1):
+        d=first+timedelta(days=i)
+        a=max(start_utc,_pt_midnight(d)); b=min(end_utc,_pt_midnight(d+timedelta(days=1)))
+        full=(a==_pt_midnight(d) and b==_pt_midnight(d+timedelta(days=1)) and b<=now)
+        if full and d.isoformat() in done:
+            continue
+        todo.append((d,a,b,full))
+    api_error=""
+    for i in range(0,len(todo),parallel):
+        group=todo[i:i+parallel]
+        results=await asyncio.gather(*(getdata_range(list(LOGGERS),a,b) for _,a,b,_ in group),return_exceptions=True)
+        for (d,a,b,full),res in zip(group,results):
+            if isinstance(res,Exception):
+                api_error=api_error or str(getattr(res,"detail",res))
+                continue
+            day=d.isoformat(); seen=set(); part={}
+            for q in res:
+                if str(q.get("sensor_measurement_type","")).lower()!="temperature":
+                    continue
+                sn=str(q.get("logger_sn",""))
+                t=_iso_dt(q.get("timestamp"))
+                if sn not in cfgs or not t or not (a<=t<b):
+                    continue
+                key=(sn,t,str(q.get("sensor_sn","")))
+                if key in seen:
+                    continue
+                seen.add(key)
+                try:
+                    v=float(calibrated_row(q).get("value"))
+                except (TypeError,ValueError):
+                    continue
+                st=part.setdefault((day,sn),{"min":v,"max":v,"sum":0.0,"n":0,"out":0})
+                st["min"]=min(st["min"],v); st["max"]=max(st["max"],v); st["sum"]+=v; st["n"]+=1
+                st["out"]+=_is_out(cfgs[sn].get("alarm_type"),cfgs[sn].get("limit"),v)
+            daily.update(part)
+            if full:
+                db_save_day_stats(day,part)
+    return daily,api_error
+
+_day_stats_task=None
+
+async def maybe_fill_day_stats(days_back=35):
+    """Once a day, store yesterday's (and any missing recent) daily stats in the background."""
+    global _day_stats_task
+    if DEPLOYMENT_ROLE!="CLOUD-PRIMARY" or (_day_stats_task and not _day_stats_task.done()):
+        return
+    now_pt=datetime.now(timezone.utc).astimezone(PLANT_TZ)
+    if now_pt.hour<1 or getattr(maybe_fill_day_stats,"last",None)==now_pt.date():
+        return
+    maybe_fill_day_stats.last=now_pt.date()
+    today=now_pt.date()
+    async def run():
+        try:
+            await collect_daily_temperature_stats(_pt_midnight(today-timedelta(days=days_back)),_pt_midnight(today))
+        except Exception as e:
+            print("Daily temperature stats fill error:",repr(e))
+    _day_stats_task=asyncio.create_task(run())
+
+def _period_window(period="",start="",end=""):
+    """(start_utc, end_utc, first_day, last_day, label) for a QA report. Days are Pacific calendar days."""
+    today=datetime.now(timezone.utc).astimezone(PLANT_TZ).date()
+    if period=="last-week":
+        a=today-timedelta(days=today.weekday()+7); b=a+timedelta(days=6)
+    elif period=="this-week":
+        a=today-timedelta(days=today.weekday()); b=today
+    elif period=="last-month":
+        b=today.replace(day=1)-timedelta(days=1); a=b.replace(day=1)
+    elif period=="this-month":
+        a=today.replace(day=1); b=today
+    elif start:
+        a=_pt_date(start,"start"); b=_pt_date(end or start,"end")
+        if b<a:
+            raise HTTPException(status_code=400,detail="End date is before the start date")
+        if b>today:
+            raise HTTPException(status_code=400,detail="End date is in the future")
+        if (b-a).days+1>MAX_RANGE_DAYS:
+            raise HTTPException(status_code=400,detail=f"Pick at most {MAX_RANGE_DAYS} days")
+    else:
+        raise HTTPException(status_code=400,detail="Choose last-week, last-month, this-week, this-month or a start date")
+    label=PERIOD_LABELS.get(period,"Custom")
+    s=_pt_midnight(a); e=min(_pt_midnight(b+timedelta(days=1)),datetime.now(timezone.utc).replace(microsecond=0))
+    return s,e,a,b,label
+
+def build_period_report_xlsx(daily,start_utc,end_utc,first_day,last_day,label,summary_lines,summary,api_error=""):
+    """QA workbook: Summary sheet, one sheet per logger (daily table + min/avg/max chart), alarm episodes."""
+    from openpyxl import Workbook
+    from openpyxl.utils import get_column_letter
+    st=_xl_styles()
+    wb=Workbook(); ws=wb.active; ws.title="Summary"
+    period_text=f"{first_day.isoformat()} to {last_day.isoformat()}"
+    ws.append([f"PBF RISE BAKING BURNABY - {label.upper()} TEMPERATURE QA REPORT"]); ws["A1"].font=st["title"]
+    for k,v in (("Period (Pacific days)",period_text),("Window start",_pt_text(start_utc)),("Window end",_pt_text(end_utc)),
+                ("Generated",_pt_text(datetime.now(timezone.utc))),("Report version","v6.6.0"),
+                ("Reading basis","Calibrated / offset-adjusted LI-COR readings"),
+                ("Limits","Readings beyond the limit use each logger's current alarm limit; minutes in alarm come from the alarm history"),
+                ("Days","Pacific calendar days; the current day is included up to the time the report was made")):
+        ws.append([k,v]); ws.cell(ws.max_row,1).font=st["bold"]
+    if api_error:
+        ws.append(["LI-COR note","Some readings could not be downloaded: "+api_error[:180]]); ws.cell(ws.max_row,2).font=st["bad_font"]
+    ws.append([])
+    for line in summary_lines:
+        ws.append([_xl(line)])
+        if line=="SUMMARY":
+            ws.cell(ws.max_row,1).font=st["bold"]
+    ws.append([])
+    heads=["Logger","Serial","Alarm type","Limit (C)","Min (C)","Avg (C)","Max (C)","Samples",
+           "Readings beyond limit","Alarm episodes","Minutes in alarm","Availability (%)",
+           "Last calibration","Next calibration due"]
+    head=ws.max_row+1; _xl_header(ws,head,heads)
+    window_min=max(1.0,(end_utc-start_utc).total_seconds()/60.0)
+    cal={c["logger_sn"]:c for c in summary["calibration"]}
+    for sn in LOGGERS:
+        cfg=get_runtime_cfg(sn); at=cfg.get("alarm_type")
+        days=[daily[k] for k in daily if k[1]==sn]
+        n=sum(d["n"] for d in days)
+        a=summary["alarm"].get(sn,{}) if at in ("high","low") else {}
+        c=cal.get(sn,{})
+        ws.append([cfg["name"],sn,"MONITOR ONLY" if at not in ("high","low") else at.upper(),
+                   float(cfg["limit"]) if at in ("high","low") and cfg.get("limit") is not None else None,
+                   round(min(d["min"] for d in days),2) if days else None,
+                   round(sum(d["sum"] for d in days)/n,2) if n else None,
+                   round(max(d["max"] for d in days),2) if days else None,
+                   n,sum(d["out"] for d in days) if at in ("high","low") else None,
+                   a.get("episodes",0) if at in ("high","low") else None,
+                   round(a.get("minutes",0),1) if at in ("high","low") else None,
+                   round(max(0.0,100-a.get("minutes",0)/window_min*100),2) if at in ("high","low") else None,
+                   c.get("last") or "—",(c.get("due") or "—")+(f" ({_due_text(c)})" if c.get("due") else "")])
+        if a.get("minutes",0)>0:
+            for col in (11,12):
+                ws.cell(ws.max_row,col).fill=st["bad_fill"]; ws.cell(ws.max_row,col).font=st["bad_font"]
+    for i,w in enumerate((26,12,13,10,10,10,10,10,12,10,12,12,15,38),1):
+        ws.column_dimensions[get_column_letter(i)].width=w
+
+    used={"summary","alarm episodes"}
+    episodes=[r for r in get_all_downtime_records() if _episode_overlap_minutes(r,start_utc,end_utc)>0]
+    day_list=[first_day+timedelta(days=i) for i in range((last_day-first_day).days+1)]
+    for sn in LOGGERS:
+        cfg=get_runtime_cfg(sn); at=cfg.get("alarm_type"); limit=cfg.get("limit") if at in ("high","low") else None
+        ws=wb.create_sheet(_sheet_title(cfg["name"],used))
+        ws.append([f"{cfg['name'].upper()} - DAILY TEMPERATURE SUMMARY"]); ws["A1"].font=st["title"]
+        ws.append(["Serial",sn]); ws.append(["Period (Pacific days)",period_text])
+        ws.append(["Alarm limit",(f"{'Above' if at=='high' else 'Below'} {float(limit):.1f} C" if limit is not None else "Monitor only (no alarm limit)")])
+        for r in range(2,5):
+            ws.cell(r,1).font=st["bold"]
+        ws.append([])
+        heads=["Date (Pacific)","Min (C)","Avg (C)","Max (C)"]+(["Limit (C)"] if limit is not None else [])+[
+            "Samples","Readings beyond limit","Alarm episodes started","Minutes in alarm"]
+        head=ws.max_row+1; _xl_header(ws,head,heads)
+        recs=[r for r in episodes if str(r.get("logger_sn"))==sn] if limit is not None else []
+        for day in day_list:
+            ds=max(start_utc,_pt_midnight(day)); de=min(end_utc,_pt_midnight(day+timedelta(days=1)))
+            d=daily.get((day.isoformat(),sn))
+            minutes=sum(_episode_overlap_minutes(r,ds,de) for r in recs) if de>ds else 0.0
+            starts=sum(1 for r in recs if (lambda t: t is not None and ds<=t<de)(_iso_dt(r.get("start_utc"))))
+            row=[day.isoformat(),round(d["min"],2) if d else None,round(d["sum"]/d["n"],2) if d and d["n"] else None,
+                 round(d["max"],2) if d else None]
+            if limit is not None:
+                row.append(float(limit))
+            row+=[d["n"] if d else 0,(d["out"] if d else 0) if limit is not None else None,
+                  starts if limit is not None else None,round(minutes,1) if limit is not None else None]
+            ws.append(row)
+            if limit is not None and ((d and d["out"]) or minutes>0):
+                for col in range(len(heads)-2,len(heads)+1):
+                    ws.cell(ws.max_row,col).fill=st["bad_fill"]; ws.cell(ws.max_row,col).font=st["bad_font"]
+            for col in range(2,6 if limit is not None else 5):
+                ws.cell(ws.max_row,col).number_format="0.00"
+        last=ws.max_row
+        ws.freeze_panes=ws.cell(head+1,1)
+        for i,w in enumerate([15,10,10,10]+([10] if limit is not None else [])+[10,12,12,12],1):
+            ws.column_dimensions[get_column_letter(i)].width=w
+        _add_minmax_chart(ws,head,last,1,2,5 if limit is not None else None,f"{get_column_letter(len(heads)+2)}{head}",
+                          f"{cfg['name']} - daily min / avg / max","Date (Pacific)")
+
+    ws=wb.create_sheet("Alarm Episodes")
+    ws.append([f"ALARM EPISODES - {period_text}"]); ws["A1"].font=st["title"]; ws.append([])
+    heads=["Logger","Serial","Start (Pacific)","End (Pacific)","Minutes in period","Worst temp (C)","Acknowledged by",
+           "Deviation status","Responsible","Corrective action"]
+    head=ws.max_row+1; _xl_header(ws,head,heads)
+    devs={str(d.get("episode_id")):d for d in load_deviations()}
+    for r in episodes:
+        if str(r.get("logger_sn")) not in _alarm_loggers():
+            continue
+        d=devs.get(str(r.get("id")),{})
+        re_dt=_iso_dt(r.get("end_utc"))
+        ws.append([_xl(r.get("name") or LOGGERS.get(str(r.get("logger_sn")),{}).get("name","")),str(r.get("logger_sn","")),
+                   _pt_text(_iso_dt(r.get("start_utc"))),_pt_text(re_dt) if re_dt else "OPEN",
+                   round(_episode_overlap_minutes(r,start_utc,end_utc),1),r.get("worst_temp"),
+                   _xl(r.get("acknowledged_by") or "—"),d.get("status") or "NO RECORD",
+                   _xl(d.get("responsible_person") or ""),_xl(d.get("corrective_action") or "")])
+        if not d:
+            ws.cell(ws.max_row,8).font=st["bad_font"]
+    if ws.max_row==head:
+        ws.append(["No alarm episodes in this period."])
+    ws.freeze_panes=ws.cell(head+1,1)
+    for i,w in enumerate((26,12,24,24,12,12,16,15,18,50),1):
+        ws.column_dimensions[get_column_letter(i)].width=w
+    buf=io.BytesIO(); wb.save(buf)
+    return buf.getvalue()
+
+async def build_period_report(period="",start="",end=""):
+    s,e,a,b,label=_period_window(period,start,end)
+    daily,api_error=await collect_daily_temperature_stats(s,e)
+    out={}
+    for (day,sn),d in daily.items():
+        out[sn]=out.get(sn,0)+d["out"]
+    lines,summary=build_report_summary(s,e,out,api_error)
+    content=await asyncio.to_thread(build_period_report_xlsx,daily,s,e,a,b,label,lines,summary,api_error)
+    kind=label.split()[0]
+    filename=f"PBF_{kind}_Temperature_QA_{a.isoformat()}_to_{b.isoformat()}.xlsx"
+    return content,filename,lines,api_error,a,b,label
+
+async def send_period_report(kind,recipient=None,manual=False):
+    period={"weekly":"last-week","monthly":"last-month"}[kind]
+    cfg=load_report_config()
+    to_addr=(recipient or cfg.get("recipient") or ", ".join(load_notification_config()["email_recipients"])).strip()
+    content,filename,lines,api_error,a,b,label=await build_period_report(period)
+    body=(f"PBF RISE BAKING BURNABY - {label.upper()} TEMPERATURE QA REPORT\n"
+          f"Period: {a.isoformat()} to {b.isoformat()} (Pacific)\n\n"+"\n".join(lines)+"\n\n"
+          "Attached: Excel workbook with a summary sheet, one sheet per logger (daily min / average / max with a chart) "
+          "and the list of alarm episodes with their deviation status.")
+    subject=f"PBF {label} Temperature QA Report - {a.isoformat()} to {b.isoformat()}"
+    acct=report_account()
+    await asyncio.to_thread(send_email,subject,body,to_addr,[(filename,content,XLSX_MIME)],acct,REPORT_SENDER_NAME if acct else None)
+    add_event("REPORT","QA Report",f"{kind.upper()} QA REPORT EMAILED",
+              detail=f"Sent to {to_addr}; {a.isoformat()} to {b.isoformat()}; manual={manual}")
+    return {"ok":True,"recipient":to_addr,"file":filename,"period":f"{a.isoformat()} to {b.isoformat()}"}
+
+def _period_keys(now_pt):
+    today=now_pt.date()
+    last_monday=today-timedelta(days=today.weekday()+7)
+    last_month=(today.replace(day=1)-timedelta(days=1)).strftime("%Y-%m")
+    return {"weekly":last_monday.isoformat(),"monthly":last_month}
+
+_period_report_task=None
+
+async def _run_period_reports(due):
+    for kind,key in due:
+        try:
+            await send_period_report(kind)
+            with report_lock:
+                state=_read_json(REPORT_STATE_FILE,{}); state=state if isinstance(state,dict) else {}
+                state[f"last_{kind}_sent_utc"]=datetime.now(timezone.utc).isoformat(); state[f"last_{kind}_error"]=""
+                _write_json(REPORT_STATE_FILE,state)
+        except Exception as e:
+            with report_lock:
+                state=_read_json(REPORT_STATE_FILE,{}); state=state if isinstance(state,dict) else {}
+                state[f"last_{kind}_error"]=str(getattr(e,"detail",e)); state[f"last_{kind}_error_utc"]=datetime.now(timezone.utc).isoformat()
+                _write_json(REPORT_STATE_FILE,state)
+            print(f"{kind} QA report email error:",repr(e))
+
+async def maybe_send_period_reports():
+    """Weekly report on Monday (last Monday-Sunday), monthly on the 1st (last calendar month), at the daily report time.
+    The first run only records the current periods, so turning this on never sends old reports."""
+    global _period_report_task
+    if DEPLOYMENT_ROLE!="CLOUD-PRIMARY" or not NOTIFICATIONS_ENABLED or not smtp_ready():
+        return
+    if _period_report_task and not _period_report_task.done():
+        return
+    cfg=load_report_config()
+    now_pt=datetime.now(timezone.utc).astimezone(PLANT_TZ)
+    hh,mm=map(int,cfg.get("time","08:00").split(":"))
+    if now_pt<now_pt.replace(hour=hh,minute=mm,second=0,microsecond=0):
+        return
+    keys=_period_keys(now_pt); due=[]
+    with report_lock:
+        state=_read_json(REPORT_STATE_FILE,{}); state=state if isinstance(state,dict) else {}
+        changed=False
+        for kind,key in keys.items():
+            if f"last_{kind}_period" not in state:
+                state[f"last_{kind}_period"]=key; changed=True     # first run: start from the next period
+            elif state[f"last_{kind}_period"]!=key:
+                state[f"last_{kind}_period"]=key; changed=True     # claim before sending: never double-send
+                if cfg.get(f"{kind}_enabled",True):
+                    due.append((kind,key))
+        if changed:
+            _write_json(REPORT_STATE_FILE,state)
+    if due:
+        _period_report_task=asyncio.create_task(_run_period_reports(due))
+
+def _cal_stage(days_left,warn_days):
+    if days_left is None or days_left>warn_days:
+        return None
+    if days_left>0:
+        return "soon"
+    return f"overdue-{(-days_left)//7}"   # due day, then once a week while overdue
+
+async def send_calibration_reminder(items,recipient=None,manual=False):
+    cfg=load_report_config()
+    to_addr=(recipient or cfg.get("recipient") or ", ".join(load_notification_config()["email_recipients"])).strip()
+    if len(items)==1:
+        subject=f"PBF Calibration Due - {items[0]['name']} ({items[0]['due']})"
+    else:
+        subject=f"PBF Calibration Due - {len(items)} loggers"
+    lines=["PBF RISE BAKING BURNABY - LOGGER CALIBRATION REMINDER",""]
+    for c in sorted(items,key=lambda c:c["days_left"]):
+        lines.append(f"- {c['name']} (serial {c['logger_sn']}): {_due_text(c)}; last calibration {c['last'] or '—'}")
+    lines+=["","After calibrating, record it on the Audit page (Calibration records) with the new next-due date.",
+            "That stops these reminders for the logger."]
+    acct=report_account()
+    await asyncio.to_thread(send_email,subject,"\n".join(lines),to_addr,None,acct,REPORT_SENDER_NAME if acct else None)
+    for c in items:
+        add_event(c["logger_sn"],c["name"],"CALIBRATION DUE REMINDER EMAILED",
+                  detail=f"{_due_text(c)}; sent to {to_addr}; manual={manual}",category="CALIBRATION")
+    return {"ok":True,"recipient":to_addr,"loggers":[c["name"] for c in items]}
+
+async def maybe_send_calibration_reminders():
+    if DEPLOYMENT_ROLE!="CLOUD-PRIMARY" or not NOTIFICATIONS_ENABLED or not smtp_ready():
+        return
+    cfg=load_report_config()
+    if not cfg.get("calibration_reminders",True):
+        return
+    now_pt=datetime.now(timezone.utc).astimezone(PLANT_TZ)
+    hh,mm=map(int,cfg.get("time","08:00").split(":"))
+    if now_pt<now_pt.replace(hour=hh,minute=mm,second=0,microsecond=0):
+        return
+    warn=int(cfg.get("calibration_days",14))
+    with report_lock:
+        state=_read_json(CAL_REMINDER_STATE_FILE,{}); state=state if isinstance(state,dict) else {}
+        if state.get("last_check_date")==now_pt.date().isoformat():
+            return
+        state["last_check_date"]=now_pt.date().isoformat()
+        due=[]
+        for c in calibration_status(now_pt.date()):
+            stage=_cal_stage(c["days_left"],warn)
+            rec=state.get(c["logger_sn"]) if isinstance(state.get(c["logger_sn"]),dict) else {}
+            if rec.get("due")!=c["due"]:
+                rec={"due":c["due"],"sent":[]}
+            if stage and stage not in rec["sent"]:
+                rec["sent"].append(stage); due.append(c)
+            state[c["logger_sn"]]=rec
+        _write_json(CAL_REMINDER_STATE_FILE,state)
+    if due:
+        try:
+            await send_calibration_reminder(due)
+        except Exception as e:
+            print("Calibration reminder email error:",repr(e))
+
+@app.get("/api/alarm-events.xlsx")
+def alarm_events_xlsx(days:str="",date:str="",start:str="",end:str="",logger:str="",kind:str=""):
+    """Event log as Excel, with the same filters as the Events page."""
+    s,e=_time_window(days,date,start,end)
+    rows=_filter_kind(db_events(s,e,logger or None),kind)
+    info=[("Period",_window_label(days,date,start,end).replace("_"," ")),
+          ("Logger",get_runtime_cfg(logger)["name"] if logger in LOGGERS else "All loggers"),
+          ("Event type",kind.upper() or "All events"),("Records",len(rows)),
+          ("Generated",_pt_text(datetime.now(timezone.utc))),("Time zone","America/Vancouver (Pacific)")]
+    table=[]
+    for r in reversed(rows):
+        t=_iso_dt(r.get("time"))
+        lim=r.get("limit")
+        table.append([_pt_text(t) if t else "",r.get("name") or "",str(r.get("logger_sn","")),r.get("event",""),
+                      r.get("reading"),(("Low " if r.get("alarm_type")=="low" else "High ")+f"{float(lim):.1f}") if lim is not None else "",
+                      r.get("email") or "",r.get("push") or "",r.get("actor") or "",r.get("detail") or ""])
+    content=_table_xlsx("PBF RISE BAKING BURNABY - ALARM EVENT LOG",info,
+                        ["Time (Pacific)","Logger","Serial","Event","Reading (C)","Limit (C)","Email","Text message","By","Detail"],
+                        table,(26,24,12,32,11,11,14,14,14,70),sheet="Events",wrap_cols=(10,))
+    return _xlsx_response(content,f"PBF_Alarm_Events_{_window_label(days,date,start,end)}.xlsx")
+
+def _audit_rows_filtered(days,date,start,end,logger,category):
+    s,e=_time_window(days,date,start,end)
+    rows=get_audit_records(None,s,e,None if logger in ("","__none") else logger,category or None)
+    if logger=="__none":
+        rows=[r for r in rows if not str(r.get("logger_sn","")).isdigit()]
+    return rows
+
+@app.get("/api/audit-trail.xlsx")
+def audit_trail_xlsx(days:str="",date:str="",start:str="",end:str="",logger:str="",category:str=""):
+    rows=_audit_rows_filtered(days,date,start,end,logger,category)
+    info=[("Period",_window_label(days,date,start,end).replace("_"," ")),
+          ("Logger","System / no logger" if logger=="__none" else (get_runtime_cfg(logger)["name"] if logger in LOGGERS else "All")),
+          ("Category",category or "All categories"),("Records",len(rows)),
+          ("Generated",_pt_text(datetime.now(timezone.utc))),("Time zone","America/Vancouver (Pacific)")]
+    table=[[r.get("time_pacific") or _pt_text(_iso_dt(r.get("time_utc"))),r.get("category",""),r.get("action",""),
+            r.get("actor",""),r.get("role",""),r.get("name",""),str(r.get("logger_sn","")),r.get("detail",""),r.get("time_utc","")]
+           for r in reversed(rows)]
+    content=_table_xlsx("PBF RISE BAKING BURNABY - AUDIT TRAIL",info,
+                        ["Time (Pacific)","Category","Action","Actor","Role","Equipment","Logger","Detail","Time (UTC)"],
+                        table,(26,16,34,16,12,24,12,70,30),sheet="Audit Trail",wrap_cols=(8,))
+    return _xlsx_response(content,f"PBF_Audit_Trail_{_window_label(days,date,start,end)}.xlsx")
+
+@app.get("/api/period-report.xlsx")
+async def period_report_xlsx(period:str="",start:str="",end:str=""):
+    """Weekly / monthly / custom QA workbook (up to 31 days)."""
+    content,filename,_,_,_,_,_=await build_period_report(period,start,end)
+    return _xlsx_response(content,filename)
+
+@app.get("/api/calibration-status")
+def calibration_status_api():
+    return {"loggers":calibration_status(),"warn_days":load_report_config().get("calibration_days",14)}
+
 @app.get("/api/maintenance-report.csv")
 async def maintenance_report_download(hours:int=24):
     hours=max(1,min(2160,int(hours)))
@@ -3029,16 +3769,34 @@ async def admin_report_config(request: Request):
         data.get("recipient",ALERT_EMAIL),
         data.get("hours",24),
         updated_by=info["username"],
+        extra=data,
     )
     add_event("REPORT","Maintenance Report","DAILY REPORT SETTINGS CHANGED",
-              detail=f"Enabled={cfg['enabled']}; time={cfg['time']} Pacific; recipient={cfg['recipient']}; by {info['username']}")
+              detail=(f"Enabled={cfg['enabled']}; time={cfg['time']} Pacific; recipient={cfg['recipient']}; "
+                      f"weekly={cfg['weekly_enabled']}; monthly={cfg['monthly_enabled']}; "
+                      f"calibration reminders={cfg['calibration_reminders']} ({cfg['calibration_days']} days); by {info['username']}"))
     return {"ok":True,"report_config":cfg}
 
 @app.post("/api/admin/send-maintenance-report")
 async def admin_send_maintenance_report(request: Request):
     info=require_right(request,"change_notifications")
+    try:
+        data=await request.json()
+    except Exception:
+        data={}
+    kind=str((data or {}).get("kind","daily")).lower()
     cfg=load_report_config()
-    result=await send_maintenance_report(cfg.get("hours",24),cfg.get("recipient"),manual=True)
+    if kind in ("weekly","monthly"):
+        result=await send_period_report(kind,cfg.get("recipient"),manual=True)
+    elif kind=="calibration":
+        items=[c for c in calibration_status() if c["days_left"] is not None and c["days_left"]<=cfg["calibration_days"]]
+        if not items:
+            raise HTTPException(status_code=400,detail=f"No logger calibration is due within {cfg['calibration_days']} days")
+        result=await send_calibration_reminder(items,cfg.get("recipient"),manual=True)
+    elif kind=="daily":
+        result=await send_maintenance_report(cfg.get("hours",24),cfg.get("recipient"),manual=True)
+    else:
+        raise HTTPException(status_code=400,detail="Unknown report type")
     result["requested_by"]=info["username"]
     return result
 
@@ -3561,6 +4319,9 @@ async def start_email_monitor():
             try:
                 await current()
                 await maybe_send_daily_maintenance_report()
+                await maybe_send_period_reports()
+                await maybe_send_calibration_reminders()
+                await maybe_fill_day_stats()
                 await maybe_daily_audit_maintenance()
             except Exception as e:
                 print("Background LI-COR/email/report monitor error:",repr(e))

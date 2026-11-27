@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>ThermoIQ · CMS Audit Controls</title>
-<link rel="icon" type="image/svg+xml" href="/static/thermoiq-mark.svg"><link rel="stylesheet" href="/static/style.css?v=6.5.0">
+<link rel="icon" type="image/svg+xml" href="/static/thermoiq-mark.svg"><link rel="stylesheet" href="/static/style.css?v=6.6.0">
 </head>
 <body>
 <header class="topbar">
@@ -12,7 +12,7 @@
   <div class="brand">
     <img class="brand-logo" src="/static/thermoiq-mark.svg" alt="ThermoIQ">
     <div><div class="wordmark">Thermo<span class="iq">IQ</span></div><h1>CMS Audit Controls</h1>
-      <p>v6.5.0</p></div>
+      <p>v6.6.0</p></div>
   </div>
   <nav><a href="/">Dashboard</a><a href="/trends">Trends</a><a href="/events">Events</a><a class="active" href="/audit">Audit</a><a href="/settings">Settings</a></nav>
 </header>
@@ -21,7 +21,7 @@
   <section class="section-head">
     <div><span class="eyebrow">AUDIT-SUPPORTING CONTROLS</span><h2>Environmental Monitoring Records</h2>
       <p>Supports maintenance, QA and food-safety record review. This dashboard does not by itself certify compliance with a specific audit scheme.</p></div>
-    <div class="actions"><a class="button-link" href="/api/audit-trail.csv">Download Audit Trail CSV</a><button onclick="loadAll()">Refresh</button><button type="button" onclick="setAllFolds(false)">Hide all</button><button type="button" onclick="setAllFolds(true)">Show all</button></div>
+    <div class="actions"><button onclick="loadAll()">Refresh</button><button type="button" onclick="setAllFolds(false)">Hide all</button><button type="button" onclick="setAllFolds(true)">Show all</button></div>
   </section>
 
   <section class="audit-status-grid">
@@ -45,7 +45,8 @@
 
   <details class="fold" data-fold="audit-calibration">
     <summary><span>Calibration Record</span></summary>
-    <div class="fold-body"><p class="fold-help">Document reference instrument, offsets, calibration date, next due date and technician. Saving the record applies the documented offsets to the live logger.</p>
+    <div class="fold-body"><p class="fold-help">Document reference instrument, offsets, calibration date, next due date and technician. Saving the record applies the documented offsets to the live logger. A reminder email goes out before each next-due date (Settings → Email reports).</p>
+    <div id="calDueNote" class="cal-due hidden"></div>
     <div class="audit-form-grid">
       <label>Logger<select id="calLogger"></select></label>
       <label>Calibration Date<input id="calDate" type="date"></label>
@@ -108,18 +109,22 @@
       <label>Show<select id="trailPeriod" onchange="trailPeriodChanged()">
         <option value="today">Today</option><option value="1">Last 24 hours</option><option value="7" selected>Last 7 days</option>
         <option value="30">Last 30 days</option><option value="90">Last 3 months</option><option value="365">Last 12 months</option>
-        <option value="day">Pick a day…</option><option value="all">Everything</option></select></label>
+        <option value="day">Pick a day…</option><option value="range">Pick dates…</option><option value="all">Everything</option></select></label>
       <label id="trailDateWrap" class="hidden">Day<input id="trailDate" type="date" onchange="loadAuditTrail()"></label>
+      <label class="trailRange hidden">From<input id="trailFrom" type="date" onchange="loadAuditTrail()"></label>
+      <label class="trailRange hidden">To<input id="trailTo" type="date" onchange="loadAuditTrail()"></label>
       <label>Logger<select id="trailLogger" onchange="loadAuditTrail()"><option value="">All</option></select></label>
       <label>Category<select id="trailCategory" onchange="loadAuditTrail()"><option value="">All categories</option></select></label>
       <button type="button" onclick="loadAuditTrail()">Refresh</button>
+      <button type="button" onclick="downloadTrail('xlsx')" title="The records shown, using these filters">Download Excel</button>
+      <button type="button" onclick="downloadTrail('csv')">Download CSV</button>
       <span class="log-count" id="trailCount"></span>
     </div>
     <div class="tablewrap audit-table"><table><thead><tr><th>Pacific Time</th><th>Category</th><th>Action</th><th>Actor</th><th>Logger</th><th>Detail</th></tr></thead><tbody id="auditRows"></tbody></table></div>
     </div>
   </details>
 </main>
-<footer>PBF Rise Baking Burnaby · CMS Audit-Supporting Controls · v6.5.0</footer>
-<script src="/static/fold.js?v=6.5.0"></script><script src="/static/audit.js?v=6.5.0"></script>
+<footer>PBF Rise Baking Burnaby · CMS Audit-Supporting Controls · v6.6.0</footer>
+<script src="/static/fold.js?v=6.6.0"></script><script src="/static/audit.js?v=6.6.0"></script>
 </body>
 </html>

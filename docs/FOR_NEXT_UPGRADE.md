@@ -8,7 +8,7 @@ Items marked **(you)** are settings or commands you can do yourself without a re
 ## A. Finish what is already started
 - [x] **U1 — Turn on the domain `thermoiq.octaveworks.com`.** Run `cloud/add_domain.sh` on the server. DNS is ready, but the site is still reached by IP address.
 - [x] **U2 — Make the Settings login cookie HTTPS-only.** Do this after U1, so the sign-in cookie is never sent over plain HTTP.
-- [ ] **U3 — Report sender `reports@octaveworks.com`** (you). Run `windows\SET_SENDER_EMAIL.bat --report --email reports@octaveworks.com --host mail.octaveworks.com`, then click *Email Report Now*.
+- [x] **U3 — Report sender `reports@octaveworks.com`** (you). Run `windows\SET_SENDER_EMAIL.bat --report --email reports@octaveworks.com --host mail.octaveworks.com`, then click *Email Report Now*.
 - [x] **U4 — Update the GitHub address** (you). Run `git remote set-url origin git@github.com:professorx71/thermo-iq.git`. The repository has moved.
 
 ## B. Alarm reliability (food-safety risk)
@@ -27,12 +27,12 @@ Items marked **(you)** are settings or commands you can do yourself without a re
 - [ ] **U15 — Admin "forgot password" note in Settings.** It shows the one server command to reset the Admin login.
 
 ## D. Reports and records
-- [ ] **U16 — Calibration-due reminder email**, 14 days before each logger's next calibration date.
-- [ ] **U17 — Summary at the top of the daily report email**: loggers out of limit, minutes out of limit, open deviations.
-- [ ] **U18 — Weekly and monthly Excel report** (one sheet per logger) for QA and audits.
-- [ ] **U19 — Excel download with a date range on the Events page**, using the same filters you see on screen.
-- [ ] **U20 — Audit trail Excel download** for the selected day or period. Today the CSV download always contains everything.
-- [ ] **U21 — Daily min, max and average chart per logger in the Excel report**, as a chart inside each worksheet.
+- [x] **U16 — Calibration-due reminder email**, 14 days before each logger's next calibration date.
+- [x] **U17 — Summary at the top of the daily report email**: loggers out of limit, minutes out of limit, open deviations.
+- [x] **U18 — Weekly and monthly Excel report** (one sheet per logger) for QA and audits.
+- [x] **U19 — Excel download with a date range on the Events page**, using the same filters you see on screen.
+- [x] **U20 — Audit trail Excel download** for the selected day or period. Today the CSV download always contains everything.
+- [x] **U21 — Daily min, max and average chart per logger in the Excel report**, as a chart inside each worksheet.
 
 ## E. Dashboard and look
 - [x] **U22 — Use the new dashboard header on every page.** "PBF Rise Baking Burnaby" centred, same title style.

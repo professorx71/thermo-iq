@@ -57,6 +57,16 @@ async function loadCalibrations(){
     <td>${esc(r.reference_instrument)}<br><small>${esc(r.reference_serial||"")}</small></td>
     <td>${esc(r.certificate_id||"—")}</td><td>${esc(r.next_due_date||"—")}</td><td>${esc(r.performed_by||"—")}</td></tr>`).join("")
     :'<tr><td colspan="8">No calibration records entered yet.</td></tr>';
+  try{
+    const c=await (await fetch("/api/calibration-status",{cache:"no-store"})).json(), w=c.warn_days||14;
+    const due=(c.loggers||[]).filter(l=>l.days_left!=null&&l.days_left<=w).sort((a,b)=>a.days_left-b.days_left);
+    const missing=(c.loggers||[]).filter(l=>!l.due).length;
+    const txt=l=>l.days_left<0?`overdue by ${-l.days_left} day${l.days_left===-1?"":"s"}`:l.days_left===0?"due today":`due in ${l.days_left} day${l.days_left===1?"":"s"}`;
+    const note=$("calDueNote");
+    note.innerHTML=(due.length?`<b>Calibration due:</b> `+due.map(l=>`<span class="${l.days_left<0?"bad":""}">${esc(l.name)} — ${txt(l)} (${esc(l.due)})</span>`).join(" · "):`<b>Calibration:</b> nothing due in the next ${w} days.`)
+      +(missing?` <small>${missing} logger${missing===1?" has":"s have"} no next-due date recorded.</small>`:"");
+    note.classList.remove("hidden"); note.classList.toggle("warn",due.length>0);
+  }catch(e){}
 }
 
 async function loadEpisodes(){
@@ -85,20 +95,33 @@ function populateDeviationFromEpisode(){
 $("devEpisode").addEventListener("change",populateDeviationFromEpisode);
 
 function trailPeriodChanged(){
-  const day=$("trailPeriod").value==="day";
+  const day=$("trailPeriod").value==="day", range=$("trailPeriod").value==="range";
   $("trailDateWrap").classList.toggle("hidden",!day);
+  document.querySelectorAll(".trailRange").forEach(el=>el.classList.toggle("hidden",!range));
   if(day&&!$("trailDate").value)$("trailDate").value=todayISO();
+  if(range&&!$("trailTo").value){$("trailTo").value=todayISO();$("trailFrom").value=todayISO().slice(0,8)+"01";}
   localStorage.setItem("thermoiq.audit.period",$("trailPeriod").value);
   loadAuditTrail();
 }
-async function loadAuditTrail(){
-  const p=$("trailPeriod").value, q=new URLSearchParams({limit:"5000"}), lg=$("trailLogger").value;
+function trailQuery(){
+  const p=$("trailPeriod").value, q=new URLSearchParams();
   if(p==="today")q.set("date",todayISO());
   else if(p==="day")q.set("date",$("trailDate").value||todayISO());
+  else if(p==="range"){q.set("start",$("trailFrom").value||todayISO());q.set("end",$("trailTo").value||todayISO());}
   else if(p!=="all")q.set("days",p);
-  if(lg&&lg!=="__none")q.set("logger",lg);
   if($("trailCategory").value)q.set("category",$("trailCategory").value);
+  return q;
+}
+function downloadTrail(kind){
+  const q=trailQuery(), lg=$("trailLogger").value;
+  if(lg)q.set("logger",lg);
+  window.location.href=(kind==="csv"?"/api/audit-trail.csv?":"/api/audit-trail.xlsx?")+q;
+}
+async function loadAuditTrail(){
+  const q=trailQuery(), lg=$("trailLogger").value; q.set("limit","5000");
+  if(lg&&lg!=="__none")q.set("logger",lg);
   const r=await fetch("/api/audit-trail?"+q,{cache:"no-store"}),x=await r.json();
+  if(!r.ok){$("auditRows").innerHTML=`<tr><td colspan="6">${esc(x.detail||"Unable to load the audit trail.")}</td></tr>`;$("trailCount").textContent="";return;}
   let rows=x.records||[];
   if(lg==="__none")rows=rows.filter(r=>!r.logger_sn||!/^\d+$/.test(String(r.logger_sn)));
   const cat=$("trailCategory"), keep=cat.value;
@@ -196,7 +219,7 @@ async function loadAll(){
 }
 
 $("reportDate").value=todayISO();
-{const sp=localStorage.getItem("thermoiq.audit.period");if(sp&&sp!=="day"&&[...$("trailPeriod").options].some(o=>o.value===sp))$("trailPeriod").value=sp;}
+{const sp=localStorage.getItem("thermoiq.audit.period");if(sp&&sp!=="day"&&sp!=="range"&&[...$("trailPeriod").options].some(o=>o.value===sp))$("trailPeriod").value=sp;}
 $("calDate").value=todayISO();
 $("devReviewDate").value=todayISO();
 loadAll();

@@ -531,3 +531,9 @@ body.tv .tv-exit:hover,body.tv .tv-exit:focus{opacity:1}
 .day-chip input,.day-switch input{left:0;top:0;width:1px;height:1px;margin:0}
 /* big screen: readings scale with the screen so "55.0 %RH" never gets cut off */
 body.tv .reading-temp,body.tv .reading-rh{font-size:clamp(26px,2.3vw,48px)}
+
+/* v6.6 calibration-due note on the Audit page */
+.cal-due{margin:0 0 12px;padding:10px 14px;border-radius:10px;border:1px solid #2a4b60;background:#0d2230;color:#cfe6f5;font-size:14px;line-height:1.6}
+.cal-due.warn{border-color:#a8742a;background:#2a1f0d;color:#ffe2b0}
+.cal-due .bad{color:#ff9b8f;font-weight:800}
+.cal-due small{color:#9fc3da}

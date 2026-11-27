@@ -2,7 +2,7 @@
 
 # ThermoIQ: PBF Rise Baking Burnaby Temperature Monitoring
 
-**Current version: v6.5.0 (Cloud Edition)**
+**Current version: v6.6.0 (Cloud Edition)**
 
 A web dashboard that monitors the plant's coolers and proofers through **LI-COR HOBO loggers**. It reads live temperature and humidity from **LI-COR Cloud** and raises alarms when a reading goes past its limit. Alarms are sent by email and text message, to recipients managed on the Settings page. The dashboard also shows trends, exports CSV and PDF reports, and keeps an audit trail with calibration and deviation records.
 
@@ -562,7 +562,13 @@ The daily maintenance report is described in [Reports](#reports).
 
 ### Daily maintenance report (email)
 
-Once a day the dashboard emails a maintenance report with **two attachments**:
+Once a day the dashboard emails a maintenance report. The email text starts with a **summary**:
+- loggers out of limit, with minutes in alarm, alarm episodes and readings past the limit, and whether each logger is still in alarm;
+- total time out of limit;
+- open deviations, and alarm episodes that have no deviation record yet;
+- loggers whose calibration is due within the reminder window, or overdue.
+
+The email has **two attachments**:
 
 | Attachment | Format | Contents |
 |---|---|---|
@@ -577,7 +583,11 @@ Once a day the dashboard emails a maintenance report with **two attachments**:
 | **Send time** | Time of day, Pacific Time (default 08:00) |
 | **Recipient email(s)** | One or more addresses, separated by commas. Blank = the `ALERT_EMAIL` address from `.env` |
 | **Report window** | Last 24 hours, 48 hours or 7 days |
-| **Email Report Now** | Sends the report immediately with the saved settings, e.g. as a test |
+| **Weekly QA report** | ENABLED / DISABLED. Sent on Mondays at the send time, covering last Monday–Sunday |
+| **Monthly QA report** | ENABLED / DISABLED. Sent on the 1st at the send time, covering last calendar month |
+| **Calibration-due reminder email** | ENABLED / DISABLED, plus how many days before the due date (default 14) |
+| **Email Report Now** | Sends the daily report immediately with the saved settings, e.g. as a test |
+| **Email Last Week's / Last Month's QA Report**, **Email Calibration Reminder Now** | Send those emails immediately |
 
 **When it is sent automatically:** once per day, at or after the send time, and only on the server where **all** of these are true:
 - `DEPLOYMENT_ROLE=CLOUD-PRIMARY`;
@@ -609,7 +619,32 @@ The script tests the login first, then updates both the local and the server `.e
 - **Data:** one row per reading time, **Date · Time · Temperature (C) · Humidity (%RH)**, stored as numbers so they can be sorted, filtered and charted.
 - **Temperatures past the alarm limit are highlighted red.** The plant-temperature logger is monitor-only and has no limit.
 - The header row stays visible while scrolling, and every column has a filter.
+- **Chart on each sheet:** min / avg / max per hour, with the alarm limit as a dashed line. Workbooks longer than 48 hours chart per day instead.
 - All times are Pacific Time and all readings include the calibration offsets.
+
+### Weekly and monthly QA report (Excel)
+
+One workbook for QA and audits, `PBF_Weekly_Temperature_QA_<from>_to_<to>.xlsx` (or `Monthly`):
+
+| Sheet | Contents |
+|---|---|
+| **Summary** | The summary above, then one row per logger: min / avg / max, samples, readings past the limit, alarm episodes, minutes in alarm, availability, last calibration and next due date |
+| **One sheet per logger** | One row per Pacific day: min / avg / max, limit, samples, readings past the limit, alarm episodes started, minutes in alarm. Days out of limit are red. A chart of daily min / avg / max with the limit line |
+| **Alarm Episodes** | Each alarm episode in the period, with who acknowledged it and its deviation status (**NO RECORD** in red when none was entered) |
+
+- **Automatic emails:** weekly on Mondays, monthly on the 1st. The first time the server runs v6.6, it only notes the current periods, so the first emails are the next Monday and the next 1st (no back-dated reports).
+- **Download:** Events page → *Weekly / monthly QA report*. Choose last week, this week so far, last month, this month so far, or any dates up to 31 days.
+- **Speed:** finished days are stored in `thermoiq.db` the first time they are fetched, and the server fills in yesterday every night. Reports then take seconds instead of the ~2 seconds per day LI-COR needs.
+- **Stored days are cleared** when a logger's alarm limit or calibration offset changes. They refill automatically.
+
+### Calibration-due reminders
+
+- **When:** once a day, at the report send time, for each logger whose latest calibration record has a *Next Calibration Due* date.
+- **How often:** one email when the due date is within the reminder window (default 14 days), one on the due date, then one a week while overdue.
+- **To:** the report recipients, as one email listing every logger due.
+- **Stopping them:** add the new calibration record on the Audit page, with its new due date.
+- **Logging:** each reminder is recorded in the event log as **CALIBRATION DUE REMINDER EMAILED**.
+- **On the Audit page:** the Calibration section shows which loggers are due or overdue.
 
 ### Downloading reports from the dashboard
 
@@ -617,10 +652,13 @@ The script tests the login first, then updates both the local and the server `.e
 |---|---|---|
 | **Alarm & Event History** (`/events`) | Download 24H Downtime CSV / 30-Day Downtime CSV | Downtime report |
 | **Alarm & Event History** (`/events`) | Download 24H Temperature CSV | Temperature history, all loggers in one CSV |
+| **Alarm & Event History** (`/events`) | Download 24H / 7-Day Temperature Excel | Temperature history workbook, one sheet per logger, with chart |
+| **Alarm & Event History** (`/events`) | **Download Excel** (next to the filters) | The event log exactly as filtered: period, day or date range, logger, event type |
+| **Alarm & Event History** (`/events`) | Download QA Excel | Weekly / monthly / custom QA workbook |
 | Browser address bar | `/api/temperature-history-all.xlsx?hours=24` (1–168) | Temperature history workbook, one sheet per logger |
 | **Trends** (`/trends`) | Download 24 Hours / Selected Date CSV | Temperature + humidity for the selected range or date |
 | **Audit** (`/audit`) | Download Modification-Restricted PDF | Audit report PDF for one logger and date |
-| **Audit** (`/audit`) | Download Audit Trail CSV | Full audit trail |
+| **Audit** (`/audit`) | **Download Excel** / **Download CSV** (audit trail filters) | The audit trail exactly as filtered: period, day or date range, logger, category. Choose *Everything* for the full trail |
 
 Every report email is recorded in the event log as **24H MAINTENANCE REPORT EMAILED**, with the recipients and window. The send status and last error are kept in `data/maintenance_report_state.json`.
 
@@ -838,6 +876,7 @@ Version-specific fixes are documented in [docs/release-notes/](docs/release-note
 | v5.3 | Admin password changes, cache fix, weekday/24 h scheduler, calibration and roles, plant logger |
 | v6.0 | Cloud edition (Docker/Caddy), username/password rules, auth fixes |
 | v6.1 | Maintenance downtime report, 7-day trend download, calendar history export |
+| **v6.6.0** | Report summary, weekly/monthly QA Excel, calibration-due reminders, filtered Excel downloads for events and audit trail, charts in Excel |
 | **v6.5.0** | Event log and audit trail moved to SQLite (faster filters), buildx on server |
 | **v6.4.0** | Same header on all pages, Trends compare and custom dates, big screen mode, phone fixes, HTTPS-only login cookie |
 | **v6.3.1** | Alarm Reliability |

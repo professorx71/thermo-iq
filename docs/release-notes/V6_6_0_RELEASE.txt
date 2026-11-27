@@ -1,0 +1,4 @@
+ThermoIQ release v6.6.0
+Released 2026-11-27.
+
+- Report summary, weekly/monthly QA Excel, calibration-due reminders, filtered Excel downloads for events and audit trail, charts in Excel
