@@ -367,6 +367,10 @@ function fillNotifications(n){
   $("smsEnabled").value=n.sms_enabled?"on":"off";
   $("emailRecipients").value=(n.email_recipients||[]).join("\n");
   $("smsRecipients").value=(n.sms_recipients||[]).join("\n");
+  $("noDataMinutes").value=String(n.no_data_minutes??30);
+  $("escalationMinutes").value=String(n.escalation_minutes??30);
+  $("escEmailRecipients").value=(n.escalation_email_recipients||[]).join("\n");
+  $("escSmsRecipients").value=(n.escalation_sms_recipients||[]).join("\n");
   if(!$("smsCarrier").options.length)
     $("smsCarrier").innerHTML=SMS_CARRIERS.map(([name,domain])=>`<option value="${domain}">${name} — @${domain}</option>`).join("");
 }
@@ -384,19 +388,25 @@ function addSmsRecipient(){
 async function saveNotifications(msgId){
   const msg=$(msgId); msg.textContent="Saving…";
   const payload={sender_name:$("senderName").value.trim(),email_enabled:$("emailEnabled").value==="on",
-    email_recipients:lines("emailRecipients"),sms_enabled:$("smsEnabled").value==="on",sms_recipients:lines("smsRecipients")};
+    email_recipients:lines("emailRecipients"),sms_enabled:$("smsEnabled").value==="on",sms_recipients:lines("smsRecipients"),
+    no_data_minutes:Number($("noDataMinutes").value),escalation_minutes:Number($("escalationMinutes").value),
+    escalation_email_recipients:lines("escEmailRecipients"),escalation_sms_recipients:lines("escSmsRecipients")};
   const r=await fetch("/api/admin/notifications",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(payload)});
   const x=await r.json().catch(()=>({}));
   if(!r.ok){msg.innerHTML='<span class="bad">'+escapeHtml(x.detail||"Unable to save")+'</span>';return false;}
   fillNotifications(x.notification_config);
-  msg.innerHTML=`<span class="good">Saved: ${x.notification_config.email_recipients.length} email and ${x.notification_config.sms_recipients.length} text recipient(s).</span>`;
+  const n=x.notification_config, sup=n.escalation_email_recipients.length+n.escalation_sms_recipients.length;
+  msg.innerHTML=`<span class="good">Saved: ${n.email_recipients.length} email and ${n.sms_recipients.length} text recipient(s)`+
+    (msgId==="escMsg"?`, ${sup} supervisor address(es). No-data alert ${n.no_data_minutes?`after ${n.no_data_minutes} min`:"OFF"}; escalation ${n.escalation_minutes?`after ${n.escalation_minutes} min`:"OFF"}`:"")+
+    `.</span>`+(msgId==="escMsg"&&n.escalation_minutes&&!sup?' <span class="warn">Add a supervisor address, or escalation does nothing.</span>':"");
   return true;
 }
-async function testNotification(kind){
-  const msgId=kind==="email"?"emailMsg":"smsMsg", msg=$(msgId);
+async function testNotification(kind,group){
+  const msgId=group==="escalation"?"escMsg":kind==="email"?"emailMsg":"smsMsg", msg=$(msgId);
   if(!await saveNotifications(msgId))return;
   msg.textContent=kind==="email"?"Sending test email…":"Sending test text…";
-  const r=await fetch(`/api/admin/notifications/test-${kind}`,{method:"POST"});
+  const r=await fetch(`/api/admin/notifications/test-${kind}`,{method:"POST",headers:{"Content-Type":"application/json"},
+    body:JSON.stringify({group:group||"main"})});
   const x=await r.json().catch(()=>({}));
   if(!r.ok){msg.innerHTML='<span class="bad">'+escapeHtml(x.detail||"Test failed")+'</span>';return;}
   const failed=(x.errors||[]).length?` · ${x.errors.length} failed: ${escapeHtml(x.errors[0])}`:"";

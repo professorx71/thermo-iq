@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>ThermoIQ · Settings</title>
-<link rel="icon" type="image/svg+xml" href="/static/thermoiq-mark.svg"><link rel="stylesheet" href="/static/style.css?v=6.6.0">
+<link rel="icon" type="image/svg+xml" href="/static/thermoiq-mark.svg"><link rel="stylesheet" href="/static/style.css?v=6.7.0">
 </head>
 <body>
 <header class="topbar">
@@ -12,7 +12,7 @@
   <div class="brand">
     <img class="brand-logo" src="/static/thermoiq-mark.svg" alt="ThermoIQ">
     <div><div class="wordmark">Thermo<span class="iq">IQ</span></div><h1>Monitoring Settings</h1>
-      <p>v6.6.0</p></div>
+      <p>v6.7.0</p></div>
   </div>
   <nav><a href="/">Dashboard</a><a href="/trends">Trends</a><a href="/events">Events</a><a href="/audit">Audit</a><a class="active" href="/settings">Settings</a></nav>
 </header>
@@ -58,7 +58,7 @@
     <details class="fold hidden" data-fold="notify" id="notifyPanel">
       <summary>Alarm notifications — email and text recipients</summary>
       <div class="fold-body">
-      <p class="fold-help">Who receives alarm, 5-minute reminder and return-to-normal messages. Every change is recorded in the audit trail.</p>
+      <p class="fold-help">Who receives alarm, 5-minute reminder, return-to-normal and no-data messages, and who is told when an alarm is not acknowledged. Every change is recorded in the audit trail.</p>
       <div class="security-grid">
         <div class="security-card"><h3>Email Alerts</h3>
           <div class="sender-line" id="senderLine">Sender: loading…</div>
@@ -81,6 +81,18 @@
           <div class="actions"><button class="primary" type="button" onclick="saveNotifications('smsMsg')">Save Notification Settings</button>
             <button type="button" onclick="testNotification('text')">Send Test Text</button></div>
           <div id="smsMsg" class="admin-message"></div>
+        </div>
+        <div class="security-card"><h3>No-Data Alarm and Escalation</h3>
+          <p class="calibration-help"><b>No-data alarm:</b> one email and text to the recipients above when a logger sends no readings, or LI-COR Cloud cannot be reached, for this long, and one when data is back. It ignores the alarm schedule; loggers in NOT IN USE are skipped.</p>
+          <label>No-data alert<select id="noDataMinutes"><option value="0">OFF</option><option value="15">After 15 minutes</option><option value="30">After 30 minutes</option><option value="60">After 1 hour</option><option value="120">After 2 hours</option><option value="240">After 4 hours</option></select></label>
+          <p class="calibration-help"><b>Escalation:</b> when nobody acknowledges a temperature alarm in time, the supervisor list below is also told, once per alarm. Supervisors then also hear when it is acknowledged and when it clears.</p>
+          <label>Escalate unacknowledged alarms<select id="escalationMinutes"><option value="0">OFF</option><option value="15">After 15 minutes</option><option value="30">After 30 minutes</option><option value="45">After 45 minutes</option><option value="60">After 1 hour</option><option value="120">After 2 hours</option></select></label>
+          <label>Supervisor email recipients — one per line<textarea id="escEmailRecipients" rows="3" placeholder="supervisor@example.com"></textarea></label>
+          <label>Supervisor text addresses — one per line<textarea id="escSmsRecipients" rows="3" placeholder="6045551234@txt.bell.ca"></textarea></label>
+          <div class="actions"><button class="primary" type="button" onclick="saveNotifications('escMsg')">Save Notification Settings</button>
+            <button type="button" onclick="testNotification('email','escalation')">Test Supervisor Email</button>
+            <button type="button" onclick="testNotification('text','escalation')">Test Supervisor Text</button></div>
+          <div id="escMsg" class="admin-message"></div>
         </div>
       </div>
       </div>
@@ -149,7 +161,7 @@
   </div>
 </section>
 </main>
-<footer>PBF Rise Baking Burnaby · Protected Monitoring Settings · v6.6.0</footer>
-<script src="/static/settings.js?v=6.6.0"></script>
+<footer>PBF Rise Baking Burnaby · Protected Monitoring Settings · v6.7.0</footer>
+<script src="/static/settings.js?v=6.7.0"></script>
 </body>
 </html>

@@ -12,12 +12,12 @@ Items marked **(you)** are settings or commands you can do yourself without a re
 - [x] **U4 — Update the GitHub address** (you). Run `git remote set-url origin git@github.com:professorx71/thermo-iq.git`. The repository has moved.
 
 ## B. Alarm reliability (food-safety risk)
-- [ ] **U5 — Review the alarm schedules** (you). Some loggers had Thursday OFF, and schedules ending at 05:59 leave a one-minute gap each day. Consider 24 h ON for coolers.
-- [ ] **U6 — Check Tortilla L3 Cooler** (you). It had been in alarm for about 33 days. Fix the cooler, or correct its limit or mode.
-- [ ] **U7 — Add text-message recipients** (you). There are none yet, so email is the only alert.
-- [ ] **U8 — "No data" alarm.** Email when a logger sends no readings for 30+ minutes, or when the LI-COR connection fails.
-- [ ] **U9 — Outside "is the server alive" check.** An uptime monitor emails if the whole site goes down, because then no alarm can be sent at all.
-- [ ] **U10 — Alarm escalation.** If an alarm is not acknowledged within, for example, 30 minutes, also email or text a supervisor list.
+- [x] **U5 — Review the alarm schedules** (you). Some loggers had Thursday OFF, and schedules ending at 05:59 leave a one-minute gap each day. Consider 24 h ON for coolers. *v6.7: the one-minute gap is now bridged automatically. Which days are ON is still your call.*
+- [x] **U6 — Check Tortilla L3 Cooler** (you). It had been in alarm for about 33 days. Fix the cooler, or correct its limit or mode. *v6.7: the "33 days" was a software fault. An episode left open over a restart was resumed weeks later. That is fixed; the old wrong durations are still in the history.*
+- [x] **U7 — Add text-message recipients** (you). There are none yet, so email is the only alert. *One text recipient was added on 2026-11-26.*
+- [x] **U8 — "No data" alarm.** Email when a logger sends no readings for 30+ minutes, or when the LI-COR connection fails.
+- [ ] **U9 — Outside "is the server alive" check.** An uptime monitor emails if the whole site goes down, because then no alarm can be sent at all. *v6.7 adds `/healthz` and `cloud/allow_healthz.sh`. Still to do (you): create the free UptimeRobot monitor (README → Outside uptime check).*
+- [x] **U10 — Alarm escalation.** If an alarm is not acknowledged within, for example, 30 minutes, also email or text a supervisor list. *Add the supervisor addresses in Settings.*
 
 ## C. Logins and security
 - [ ] **U11 — Stay signed in across updates.** Sessions and the wrong-password lockout currently reset on every deploy or restart.

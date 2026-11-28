@@ -1,0 +1,4 @@
+ThermoIQ release v6.7.0
+Released 2026-11-27.
+
+- U5-U10: no-data and LI-COR alarms, escalation to supervisors, /healthz, one-minute schedule gap bridged, alarm episodes no longer resumed after restarts, no crash when a logger in alarm sends no data

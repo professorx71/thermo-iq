@@ -4,7 +4,8 @@ function f(v){return v==null?"—":Number(v).toFixed(1)+" °C"}
 function esc(v){return String(v??"").replace(/[&<>"']/g,m=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#039;"}[m]));}
 function todayISO(){const d=new Date();return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`;}
 const KINDS={
-  ALARM:e=>/TEMPERATURE ALARM|REMINDER/.test(e), ACK:e=>/ACKNOWLEDGED/.test(e), NORMAL:e=>/RETURN TO NORMAL/.test(e),
+  ALARM:e=>/TEMPERATURE ALARM|REMINDER|NO DATA|CONNECTION LOST|ESCALATED/.test(e), ACK:e=>/ACKNOWLEDGED/.test(e),
+  NORMAL:e=>/RETURN TO NORMAL|DATA RESTORED|CONNECTION RESTORED|EPISODE CLOSED/.test(e),
   CHANGE:e=>/CHANGED|ENABLED|DISABLED|ADDED|REMOVED|RESET|SUSPENDED/.test(e), LOGIN:e=>/LOGIN|LOGOUT|LOCKED/.test(e)};
 function periodChanged(){
   const day=$("evPeriod").value==="day", range=$("evPeriod").value==="range";

@@ -2,7 +2,7 @@
 
 # ThermoIQ: PBF Rise Baking Burnaby Temperature Monitoring
 
-**Current version: v6.6.0 (Cloud Edition)**
+**Current version: v6.7.0 (Cloud Edition)**
 
 A web dashboard that monitors the plant's coolers and proofers through **LI-COR HOBO loggers**. It reads live temperature and humidity from **LI-COR Cloud** and raises alarms when a reading goes past its limit. Alarms are sent by email and text message, to recipients managed on the Settings page. The dashboard also shows trends, exports CSV and PDF reports, and keeps an audit trail with calibration and deviation records.
 
@@ -191,9 +191,11 @@ thermoiq/
 
 ### Background monitor
 When the app starts, it launches a background task that runs every **60 seconds** and:
-1. Fetches the latest readings from LI-COR and evaluates alarms (`current()`)
+1. Fetches the latest readings from LI-COR and evaluates alarms (`current()`), no-data alarms and escalation
 2. Sends the daily maintenance/downtime report if one is due
 3. Runs daily audit maintenance: retention cleanup and the automatic ZIP backup
+
+Each finished cycle is recorded; `GET /healthz` answers `200 {"status":"ok"}` while cycles keep finishing and `503` when none has finished for 5 minutes (see [Outside uptime check](#outside-uptime-check)).
 
 ---
 
@@ -521,7 +523,10 @@ For each logger, on every 60-second cycle:
    - `5-MIN REMINDER`: repeats every 5 minutes while the alarm stays active
    - `ALARM NOTIFICATION SUSPENDED`: monitoring was suspended while an alarm was active
    - `RETURN TO NORMAL`: sends one recovery email and text, including the alarm duration
+   - `ALARM ESCALATED`: nobody acknowledged the alarm in time; the supervisor list is told (see below)
 6. **Acknowledge:** a flashing **red** banner turns steady **orange** ("ACKNOWLEDGED — CONDITION STILL ACTIVE"). The banner clears by itself when the reading is back within the limit. A new alarm always starts unacknowledged.
+7. **Restarts and deploys:** an alarm still active after a restart carries on quietly. It is not raised again, the acknowledgement is kept, and reminders continue. An alarm that ended while the server was down is closed at the last time it was seen in alarm (`ALARM EPISODE CLOSED AFTER RESTART`). An episode not seen in alarm for more than 15 minutes is never resumed: a new alarm starts a new episode, so durations stay correct.
+8. **No reading:** a logger with no reading in the last 40 minutes keeps its alarm state unchanged; the no-data alarm reports the gap.
 
 ---
 
@@ -540,6 +545,31 @@ Recipients are managed by the **Admin** on the Settings page and saved in `data/
 
 Automatic alarms are sent **only** when `NOTIFICATIONS_ENABLED=true`.
 
+### No-data alarm
+
+Settings → **Alarm notifications** → **No-Data Alarm and Escalation** → **No-data alert**: OFF, or after 15 min, 30 min (default), 1 h, 2 h or 4 h.
+
+- **A logger stops sending readings** for that long: one email and text (`NO DATA ALARM`) listing every logger that went quiet, then one `DATA RESTORED` message when readings arrive again. There are no repeats in between.
+- **LI-COR Cloud cannot be reached** for that long, for example an API error, an expired token, or the internet being down: one `LI-COR CONNECTION LOST` message, then `LI-COR CONNECTION RESTORED`. Short blips send nothing.
+- Goes to the normal alarm recipients **whatever the alarm schedule says**, because the temperature record has a gap either way. Loggers in **NOT IN USE** are skipped.
+- State is kept in `data/no_data_state.json`, so a restart does not repeat the message.
+
+### Escalation (unacknowledged alarms)
+
+On the same card: **Escalate unacknowledged alarms** (OFF, or 15, 30 (default), 45, 60, 120 min), plus **Supervisor email recipients** and **Supervisor text addresses**.
+
+- A temperature alarm nobody acknowledges within that time is sent **once** to the supervisor list (`ALARM ESCALATED`).
+- After that, the supervisors are also told when it is **acknowledged** (and by whom), when it **returns to normal**, or when its notifications are **suspended** by the schedule or NOT IN USE.
+- Without supervisor addresses, escalation does nothing. Use **Test Supervisor Email / Text** to check them.
+
+### Outside uptime check
+
+If the whole server or the alarm monitor stops, the dashboard cannot send any alarm. An **outside** service has to notice that:
+
+1. The server answers `https://thermoiq.octaveworks.com/healthz` without the viewer login. This was set up once with `sudo bash cloud/allow_healthz.sh thermoiq.octaveworks.com`; everything else still asks for the login.
+2. A free uptime monitor, e.g. [UptimeRobot](https://uptimerobot.com), checks it every 5 minutes. Use monitor type **HTTP(s)**, URL `https://thermoiq.octaveworks.com/healthz`, and alert contacts set to the maintenance email (and phone app).
+3. It alerts when the page is unreachable (server, Caddy or container down) **or** answers 503 (the alarm monitor has stalled for 5 minutes).
+
 ### Alarm notification schedule
 
 Each logger card on the Settings page has an **Alarm Notification Scheduler** (Admin and Operator):
@@ -550,7 +580,7 @@ Each logger card on the Settings page has an **Alarm Notification Scheduler** (A
 | **Weekly scheduler** ON | Alarms are sent only inside each day's window |
 | **Alarms** ON/OFF (per day) | OFF = no alarm notifications that day |
 | **24 h** | Alarms all day |
-| **Alarm ON / Alarm OFF** (per day) | That day's window, Pacific Time. An OFF time earlier than the ON time runs overnight: Mon ON 22:00 · OFF 06:00 covers Monday 22:00 to Tuesday 06:00 |
+| **Alarm ON / Alarm OFF** (per day) | That day's window, Pacific Time. An OFF time earlier than the ON time runs overnight: Mon ON 22:00 · OFF 06:00 covers Monday 22:00 to Tuesday 06:00. A one-minute gap between two windows (OFF 05:59, next ON 06:00) is treated as continuous, so an alarm is not suspended and raised again at that minute |
 
 Buttons: **Copy Mon → Tue–Fri**, **Copy Mon → every day**, **Preset: Mon–Fri 24 h**, and **Apply this schedule to ALL loggers**. Readings are still displayed and logged while alarms are scheduled OFF. Schedules saved by v6.2.x are converted automatically.
 
@@ -765,6 +795,7 @@ All endpoints are in [app/server.py](app/server.py). Endpoints marked 🔒 need 
 | GET | `/api/dashboard-history` | Trend data for all loggers |
 | GET | `/api/history/{sn}` | Trend data for one logger |
 | GET | `/api/deployment-status` | Version, deployment role, notification flag |
+| GET | `/healthz` | `200` while the alarm monitor runs, `503` when stalled 5 min. No viewer login (for the outside uptime monitor) |
 | GET | `/api/v501-status` | Extended system status |
 | GET | `/api/email-status` | Whether email and texts are configured (recipient counts only) |
 
@@ -876,6 +907,7 @@ Version-specific fixes are documented in [docs/release-notes/](docs/release-note
 | v5.3 | Admin password changes, cache fix, weekday/24 h scheduler, calibration and roles, plant logger |
 | v6.0 | Cloud edition (Docker/Caddy), username/password rules, auth fixes |
 | v6.1 | Maintenance downtime report, 7-day trend download, calendar history export |
+| **v6.7.0** | U5-U10: no-data and LI-COR alarms, escalation to supervisors, /healthz, one-minute schedule gap bridged, alarm episodes no longer resumed after restarts, no ... |
 | **v6.6.0** | Report summary, weekly/monthly QA Excel, calibration-due reminders, filtered Excel downloads for events and audit trail, charts in Excel |
 | **v6.5.0** | Event log and audit trail moved to SQLite (faster filters), buildx on server |
 | **v6.4.0** | Same header on all pages, Trends compare and custom dates, big screen mode, phone fixes, HTTPS-only login cookie |

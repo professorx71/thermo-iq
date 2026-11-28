@@ -402,12 +402,19 @@ def schedule_is_active(cfg, when_utc=None):
     - schedule disabled: active all the time (subject to manual RUNNING/NOT IN USE).
     - start == end: active 24 hours on selected start days.
     - an overnight window (e.g. 22:00-06:00) belongs to the day on which it starts.
+    - a gap of one minute between two windows (OFF 05:59, next ON 06:00) is bridged,
+      so an alarm is not suspended and raised again at that minute.
     """
     if not bool(cfg.get("schedule_enabled",False)):
         return True
     week=cfg.get("schedule_week") or _week_from_legacy(cfg.get("schedule_days",[0,1,2,3,4,5,6]),
                                                         cfg.get("schedule_start","00:00"),cfg.get("schedule_end","00:00"))
     now=(when_utc or datetime.now(timezone.utc)).astimezone(PLANT_TZ)
+    if _week_active_at(week,now):
+        return True
+    return _week_active_at(week,now-timedelta(minutes=1)) and _week_active_at(week,now+timedelta(minutes=1))
+
+def _week_active_at(week, now):
     cur=now.hour*60+now.minute
     wd=now.weekday()
     today=week[wd]
@@ -1007,7 +1014,7 @@ def create_audit_backup(reason="scheduled",actor="SYSTEM"):
     files=[
         STATE_FILE,CONFIG_FILE,DOWNTIME_FILE,DOWNTIME_ACTIVE_FILE,
         REPORT_CONFIG_FILE,REPORT_STATE_FILE,CALIBRATION_FILE,
-        AUDIT_CONFIG_FILE,DEVIATION_FILE,NOTIFY_CONFIG_FILE,CAL_REMINDER_STATE_FILE,
+        AUDIT_CONFIG_FILE,DEVIATION_FILE,NOTIFY_CONFIG_FILE,CAL_REMINDER_STATE_FILE,NO_DATA_STATE_FILE,
     ]
     # Events and the audit trail are in thermoiq.db; the backup keeps the familiar JSON files.
     exports={EVENT_FILE.name:db_events(),AUDIT_FILE.name:db_audit()}
@@ -1015,7 +1022,7 @@ def create_audit_backup(reason="scheduled",actor="SYSTEM"):
         "created_utc":now.isoformat(),
         "created_pacific":now.astimezone(PLANT_TZ).isoformat(),
         "timezone":"America/Vancouver",
-        "version":"6.6.0",
+        "version":"6.7.0",
         "reason":reason,
         "actor":actor,
         "note":"Data/config backup only. Secrets in .env are intentionally excluded.",
@@ -1122,7 +1129,7 @@ async def build_audit_pdf(sn,date_text):
     deviations={str(r.get("episode_id")):r for r in load_deviations()}
 
     dataset={
-        "version":"6.6.0",
+        "version":"6.7.0",
         "date":selected.isoformat(),
         "timezone":"America/Vancouver",
         "logger_serials":serials,
@@ -1316,13 +1323,69 @@ def _update_worst_temp(rec, temp):
     else:
         rec["worst_temp"]=max(float(cur),t)
 
+EPISODE_RESUME_MINUTES=15   # an open episode not seen in alarm for longer than this is not resumed
+
+def _episode_last_seen(sn, rec):
+    """Last time this open episode was known to be in alarm: its last_seen_utc, or (for
+    episodes saved before v6.7) the newest alarm or reminder event for the logger."""
+    seen=_iso_dt(rec.get("last_seen_utc"))
+    if seen:
+        return seen
+    start=_iso_dt(rec.get("start_utc"))
+    for e in reversed(db_events(start=start,logger=sn,limit=200)):
+        if e.get("event") in ("HIGH TEMPERATURE ALARM","LOW TEMPERATURE ALARM","5-MIN REMINDER","ALARM ESCALATED"):
+            return _iso_dt(e.get("time")) or start
+    return start
+
+def _close_active_record(active, sn, end_utc, recovery_temp, reason):
+    """Move active[sn] to the downtime history (caller holds downtime_lock)."""
+    rec=active.pop(sn,None)
+    if not isinstance(rec,dict):
+        return None
+    started=_iso_dt(rec.get("start_utc")) or end_utc
+    end_utc=max(end_utc,started)
+    rec["end_utc"]=end_utc.isoformat()
+    rec["duration_minutes"]=round(max(0.0,(end_utc-started).total_seconds()/60.0),2)
+    rec["recovery_temp"]=float(recovery_temp) if recovery_temp is not None else None
+    rec["status"]="CLOSED"
+    rec["end_reason"]=reason
+    _update_worst_temp(rec,recovery_temp)
+    history=_read_json(DOWNTIME_FILE,[])
+    if not isinstance(history,list):
+        history=[]
+    history.append(rec)
+    _write_json(DOWNTIME_FILE,history[-10000:])
+    return dict(rec)
+
+def close_orphan_downtime(sn, reason):
+    """Close an open episode whose alarm ended while it was not tracked (server restart,
+    deploy). It ends at the last time it was seen in alarm, not now."""
+    with downtime_lock:
+        active=_read_json(DOWNTIME_ACTIVE_FILE,{})
+        if not isinstance(active,dict) or not isinstance(active.get(sn),dict):
+            return None
+        end=_episode_last_seen(sn,active[sn]) or datetime.now(timezone.utc)
+        rec=_close_active_record(active,sn,end,None,reason)
+        _write_json(DOWNTIME_ACTIVE_FILE,active)
+        return rec
+
 def start_or_resume_downtime(sn, device, when_utc, temp):
-    """Persist an alarm episode so server restarts do not lose downtime duration."""
+    """Persist an alarm episode so server restarts do not lose downtime duration.
+    Returns (episode, resumed). An open episode last seen in alarm more than
+    EPISODE_RESUME_MINUTES ago is closed at that time and a new episode starts."""
+    resumed=False
     with downtime_lock:
         active=_read_json(DOWNTIME_ACTIVE_FILE,{})
         if not isinstance(active,dict):
             active={}
         rec=active.get(sn)
+        if isinstance(rec,dict):
+            seen=_episode_last_seen(sn,rec)
+            if not seen or (when_utc-seen).total_seconds()>EPISODE_RESUME_MINUTES*60:
+                _close_active_record(active,sn,seen or when_utc,None,"EPISODE CLOSED - ALARM ENDED WHILE NOT TRACKED")
+                rec=None
+            else:
+                resumed=True
         if not isinstance(rec,dict):
             rec={
                 "id":uuid.uuid4().hex,
@@ -1344,42 +1407,40 @@ def start_or_resume_downtime(sn, device, when_utc, temp):
             rec["alarm_type"]=device.get("alarm_type",rec.get("alarm_type"))
             _update_worst_temp(rec,temp)
             active[sn]=rec
+        rec["last_seen_utc"]=when_utc.isoformat()
         _write_json(DOWNTIME_ACTIVE_FILE,active)
-        return dict(rec)
+        return dict(rec),resumed
 
-def update_active_downtime(sn,temp):
+def update_active_downtime(sn,temp,**fields):
+    """Record that the episode is still in alarm (plus optional extra fields, e.g. escalated_at)."""
     with downtime_lock:
         active=_read_json(DOWNTIME_ACTIVE_FILE,{})
         if not isinstance(active,dict) or sn not in active:
-            return
+            return None
         rec=active[sn]
         _update_worst_temp(rec,temp)
+        rec["last_seen_utc"]=datetime.now(timezone.utc).isoformat()
+        rec.update(fields)
         active[sn]=rec
         _write_json(DOWNTIME_ACTIVE_FILE,active)
+        return dict(rec)
+
+def active_downtime(sn):
+    with downtime_lock:
+        active=_read_json(DOWNTIME_ACTIVE_FILE,{})
+    rec=active.get(sn) if isinstance(active,dict) else None
+    return dict(rec) if isinstance(rec,dict) else None
 
 def close_downtime(sn, when_utc, recovery_temp=None, reason="RETURN TO NORMAL"):
     with downtime_lock:
         active=_read_json(DOWNTIME_ACTIVE_FILE,{})
         if not isinstance(active,dict):
             active={}
-        rec=active.pop(sn,None)
-        if not isinstance(rec,dict):
+        rec=_close_active_record(active,sn,when_utc,recovery_temp,reason)
+        if rec is None:
             return None
-        started=_iso_dt(rec.get("start_utc")) or when_utc
-        rec["end_utc"]=when_utc.isoformat()
-        rec["duration_minutes"]=round(max(0.0,(when_utc-started).total_seconds()/60.0),2)
-        rec["recovery_temp"]=float(recovery_temp) if recovery_temp is not None else None
-        rec["status"]="CLOSED"
-        rec["end_reason"]=reason
-        _update_worst_temp(rec,recovery_temp)
-        history=_read_json(DOWNTIME_FILE,[])
-        if not isinstance(history,list):
-            history=[]
-        history.append(rec)
-        history=history[-10000:]
-        _write_json(DOWNTIME_FILE,history)
         _write_json(DOWNTIME_ACTIVE_FILE,active)
-        return dict(rec)
+        return rec
 
 def _legacy_downtime_from_events(cutoff_utc=None):
     """Best-effort reconstruction of pre-v6.1 alarm episodes from persistent events."""
@@ -1601,26 +1662,59 @@ def load_notification_config():
     sms=saved.get("sms_recipients")
     if not isinstance(sms,list):
         sms=[]
+    def _list(key):
+        v=saved.get(key)
+        return [str(a) for a in v] if isinstance(v,list) else []
     return {
         "email_enabled":bool(saved.get("email_enabled",True)),
         "email_recipients":[str(a) for a in emails],
         "sms_enabled":bool(saved.get("sms_enabled",True)),
         "sms_recipients":[str(a) for a in sms],
         "sender_name":str(saved.get("sender_name") or "ThermoIQ Alerts")[:60],
+        "no_data_minutes":_minutes_choice(saved.get("no_data_minutes",30),NO_DATA_CHOICES,30),
+        "escalation_minutes":_minutes_choice(saved.get("escalation_minutes",30),ESCALATION_CHOICES,30),
+        "escalation_email_recipients":_list("escalation_email_recipients"),
+        "escalation_sms_recipients":_list("escalation_sms_recipients"),
         "updated_at":saved.get("updated_at"),
         "updated_by":saved.get("updated_by"),
     }
+
+NO_DATA_CHOICES=(0,15,30,60,120,240)       # 0 = no-data alerts OFF
+ESCALATION_CHOICES=(0,15,30,45,60,120)     # 0 = escalation OFF
+
+def _minutes_choice(value,choices,default):
+    try:
+        n=int(value)
+    except Exception:
+        return default
+    return n if n in choices else default
 
 def save_notification_config(data,updated_by):
     sender_name=str(data.get("sender_name") or "").strip()
     if not sender_name or len(sender_name)>60 or re.search(r"[\r\n<>\"]",sender_name):
         raise HTTPException(status_code=400,detail="Sender name must be 1-60 characters without < > \" or line breaks")
+    old=load_notification_config()
+    def _choice(key,choices,label):
+        if key not in data:
+            return old[key]
+        try:
+            n=int(data[key])
+        except Exception:
+            n=None
+        if n not in choices:
+            raise HTTPException(status_code=400,detail=f"{label} must be one of: "+", ".join(str(c) for c in choices)+" minutes (0 = OFF)")
+        return n
     cfg={
         "email_enabled":bool(data.get("email_enabled",True)),
         "email_recipients":parse_address_list(data.get("email_recipients",[]),"email"),
         "sms_enabled":bool(data.get("sms_enabled",True)),
         "sms_recipients":parse_address_list(data.get("sms_recipients",[]),"text message"),
         "sender_name":sender_name,
+        # Settings saved by an older page keep their no-data / escalation values.
+        "no_data_minutes":_choice("no_data_minutes",NO_DATA_CHOICES,"No-data alert time"),
+        "escalation_minutes":_choice("escalation_minutes",ESCALATION_CHOICES,"Escalation time"),
+        "escalation_email_recipients":parse_address_list(data.get("escalation_email_recipients",old["escalation_email_recipients"]),"supervisor email"),
+        "escalation_sms_recipients":parse_address_list(data.get("escalation_sms_recipients",old["escalation_sms_recipients"]),"supervisor text message"),
         "updated_at":datetime.now(timezone.utc).isoformat(),
         "updated_by":updated_by,
     }
@@ -1692,9 +1786,9 @@ def send_email(subject,body,recipient=None,attachments=None,account=None,sender_
         raise RuntimeError(errors[0] if errors else "No email was sent")
     return sent,errors
 
-def send_text(message):
-    """Text the SMS recipients through their carrier's email-to-text address."""
-    recipients=load_notification_config()["sms_recipients"]
+def send_text(message,recipients=None):
+    """Text the SMS recipients (or the given list) through their carrier's email-to-text address."""
+    recipients=recipients if recipients is not None else load_notification_config()["sms_recipients"]
     # Plain ASCII: carrier gateways often garble other characters.
     message=message.encode("ascii","replace").decode("ascii")
     message=message if len(message)<=SMS_MAX_CHARS else message[:SMS_MAX_CHARS-3]+"..."
@@ -1712,66 +1806,135 @@ text_status={"last_success":None,"last_error":None,"last_message":None}
 def fmt_local_time(dt):
     return dt.astimezone().strftime("%b %d, %Y %I:%M %p")
 
-def _safe_send(subject,body,event_id=None):
+def _mark_events(event_id,**changes):
+    for eid in (event_id if isinstance(event_id,(list,tuple)) else [event_id]):
+        if eid: update_event(eid,**changes)
+
+def _safe_send(subject,body,event_id=None,recipients=None):
     try:
-        sent,errors=send_email(subject,body)
+        sent,errors=send_email(subject,body,recipients)
         email_status["last_success"]=datetime.now(timezone.utc).isoformat()
         email_status["last_error"]=errors[0] if errors else None
         email_status["last_subject"]=subject
         print(f"Email sent to {sent} recipient(s):",subject)
-        if event_id: update_event(event_id,email=_result_text(sent,errors))
+        _mark_events(event_id,email=_result_text(sent,errors))
     except Exception as e:
         email_status["last_error"]=str(e)
         email_status["last_subject"]=subject
         print("Email notification error:",repr(e))
-        if event_id: update_event(event_id,email="FAILED: "+str(e)[:80])
+        _mark_events(event_id,email="FAILED: "+str(e)[:80])
 
-def _safe_text(message,event_id=None):
+def _safe_text(message,event_id=None,recipients=None):
     try:
-        sent,errors=send_text(message)
+        sent,errors=send_text(message,recipients)
         text_status["last_success"]=datetime.now(timezone.utc).isoformat()
         text_status["last_error"]=errors[0] if errors else None
         text_status["last_message"]=message
         print(f"Text message sent to {sent} recipient(s):",message)
         # The event field is still called "push" so older event history keeps its column.
-        if event_id: update_event(event_id,push=_result_text(sent,errors))
+        _mark_events(event_id,push=_result_text(sent,errors))
     except Exception as e:
         text_status["last_error"]=str(e)
         text_status["last_message"]=message
         print("Text message notification error:",repr(e))
-        if event_id: update_event(event_id,push="FAILED: "+str(e)[:80])
+        _mark_events(event_id,push="FAILED: "+str(e)[:80])
 
-def _queue_notifications(cfg,subject,body,text,event_id):
-    if email_alerts_ready(cfg): threading.Thread(target=_safe_send,args=(subject,body,event_id),daemon=True).start()
-    if sms_alerts_ready(cfg): threading.Thread(target=_safe_text,args=(text,event_id),daemon=True).start()
+def _channel_states(cfg,group="main"):
+    """("QUEUED"|"NOT CONFIGURED") for email and text. group="escalation" = the supervisor lists."""
+    if group=="escalation":
+        e=smtp_ready() and cfg["email_enabled"] and bool(cfg["escalation_email_recipients"])
+        t=smtp_ready() and cfg["sms_enabled"] and bool(cfg["escalation_sms_recipients"])
+    else:
+        e=email_alerts_ready(cfg); t=sms_alerts_ready(cfg)
+    return ("QUEUED" if e else "NOT CONFIGURED"),("QUEUED" if t else "NOT CONFIGURED")
+
+def escalation_ready(cfg):
+    return cfg["escalation_minutes"]>0 and "QUEUED" in _channel_states(cfg,"escalation")
+
+def _queue_notifications(cfg,subject,body,text,event_id,group="main"):
+    """Send email + text in background threads. event_id may be one id, a list, or None."""
+    email_state,text_state=_channel_states(cfg,group)
+    emails=cfg["escalation_email_recipients"] if group=="escalation" else None
+    phones=cfg["escalation_sms_recipients"] if group=="escalation" else None
+    if email_state=="QUEUED": threading.Thread(target=_safe_send,args=(subject,body,event_id,emails),daemon=True).start()
+    if text_state=="QUEUED": threading.Thread(target=_safe_text,args=(text,event_id,phones),daemon=True).start()
+
+def _maybe_escalate(d,temp,now,ncfg,rec,acked):
+    """U10: once per alarm, tell the supervisor list when nobody has acknowledged it in time."""
+    if not rec or rec.get("escalated_at") or acked or not escalation_ready(ncfg):
+        return
+    raised=_iso_dt(rec.get("raised_utc") or rec.get("start_utc"))
+    if not raised or (now-raised).total_seconds()<ncfg["escalation_minutes"]*60:
+        return
+    sn=d["logger_sn"]; mins=max(1,round((now-raised).total_seconds()/60))
+    update_active_downtime(sn,temp,escalated_at=now.isoformat())
+    es,ts=_channel_states(ncfg,"escalation")
+    ll="Low" if d["alarm_type"]=="low" else "High"
+    eid=add_event(sn,d["name"],"ALARM ESCALATED",temp,d["limit"],d["alarm_type"],es,ts,
+                  f"Not acknowledged after {mins} min; sent to the supervisor list",category="ALARM")
+    body=(f"PBF TEMPERATURE ALARM - NOT ACKNOWLEDGED\n\nEquipment: {d['name']}\nTemperature: {temp:.1f} C\n"
+          f"{ll} Limit: {d['limit']:.1f} C\nAlarm raised: {fmt_local_time(raised)}\n"
+          f"Nobody has acknowledged this alarm for {mins} minutes.\n\n"
+          "Please check the equipment, then acknowledge the alarm on the ThermoIQ dashboard.\n\n"
+          "You receive this because you are on the supervisor (escalation) list.\nThermoIQ Temperature Monitoring")
+    text=f"ESCALATED: {d['name']} {temp:.1f}C (limit {d['limit']:.1f}C) not acknowledged for {mins} min"
+    _queue_notifications(ncfg,f"PBF Alarm NOT ACKNOWLEDGED - {d['name']}",body,text,eid,"escalation")
+
+def _tell_supervisors(ncfg,rec,subject,body,text):
+    """Follow-up to the supervisor list for an alarm that was escalated to them."""
+    if rec and rec.get("escalated_at") and "QUEUED" in _channel_states(ncfg,"escalation"):
+        _queue_notifications(ncfg,subject,body,text,None,"escalation")
 
 def process_email_notifications(devices):
     if not NOTIFICATIONS_ENABLED:
         return
     now=datetime.now(timezone.utc)
     ncfg=load_notification_config()
-    email_state="QUEUED" if email_alerts_ready(ncfg) else "NOT CONFIGURED"
-    text_state="QUEUED" if sms_alerts_ready(ncfg) else "NOT CONFIGURED"
+    email_state,text_state=_channel_states(ncfg)
+    acked_map=get_alarm_state().get("acked",{})
     with email_lock:
         for d in devices:
             sn=d["logger_sn"]; current=bool(d["alarm"]); previous=email_alarm_state.get(sn)
+            if d.get("temperature") is None:
+                # No reading in the last 40 minutes: keep this logger's alarm state as it is
+                # (the no-data alarm reports the gap) and go on with the next logger.
+                continue
+            temp=float(d["temperature"])
             if previous is None:
                 email_alarm_state[sn]=current
-                if not current: continue
-            temp=float(d["temperature"]) if d.get("temperature") is not None else None
+                if not current:
+                    # First check after a restart. An alarm episode left open ended while the
+                    # server was not tracking it: close it at the last time it was seen in alarm.
+                    if active_downtime(sn):
+                        reason=("ALARM NOTIFICATION SUSPENDED - "+(d.get("suppression_reason") or "MONITORING OFF")
+                                if d.get("raw_alarm") else "RETURN TO NORMAL")
+                        rec=close_orphan_downtime(sn,reason+" (closed after restart)")
+                        if rec:
+                            add_event(sn,d["name"],"ALARM EPISODE CLOSED AFTER RESTART",temp,d["limit"],d["alarm_type"],
+                                      detail=(f"Episode started {_pt_text(_iso_dt(rec['start_utc']))}; closed at "
+                                              f"{_pt_text(_iso_dt(rec['end_utc']))}, the last time it was seen in alarm"),
+                                      category="ALARM")
+                    continue
             ll="Low" if d["alarm_type"]=="low" else "High"
             st="LOW TEMPERATURE" if d["alarm_type"]=="low" else "HIGH TEMPERATURE"
             if current and previous is not True:
-                episode=start_or_resume_downtime(sn,d,now,temp)
+                episode,resumed=start_or_resume_downtime(sn,d,now,temp)
                 episode_started=_iso_dt(episode.get("start_utc")) or now
-                email_alarm_started[sn]=episode_started; email_alarm_last_sent[sn]=now; clear_ack(sn)
-                eid=add_event(sn,d["name"],st+" ALARM",temp,d["limit"],d["alarm_type"],email_state,text_state)
-                body=(f"PBF TEMPERATURE ALARM\n\nEquipment: {d['name']}\nTemperature: {temp:.1f} C\n"
-                      f"{ll} Limit: {d['limit']:.1f} C\nStatus: {st}\nTime: {fmt_local_time(now)}\n\nThermoIQ Temperature Monitoring")
-                text=f"ALARM {d['name']} {'HIGH' if d['alarm_type']=='high' else 'LOW'} TEMP {temp:.1f}C (limit {d['limit']:.1f}C) {now.astimezone(PLANT_TZ):%H:%M}"
-                _queue_notifications(ncfg,f"PBF Temperature Alarm - {d['name']}",body,text,eid)
+                email_alarm_started[sn]=episode_started; email_alarm_last_sent[sn]=now
+                if resumed and previous is None:
+                    # The server restarted during this alarm (deploy): carry on quietly. The
+                    # acknowledgement is kept and the next 5-minute reminder follows as usual.
+                    print(f"Alarm on {d['name']} still active after restart; episode resumed")
+                else:
+                    clear_ack(sn)
+                    update_active_downtime(sn,temp,raised_utc=now.isoformat(),escalated_at=None)
+                    eid=add_event(sn,d["name"],st+" ALARM",temp,d["limit"],d["alarm_type"],email_state,text_state)
+                    body=(f"PBF TEMPERATURE ALARM\n\nEquipment: {d['name']}\nTemperature: {temp:.1f} C\n"
+                          f"{ll} Limit: {d['limit']:.1f} C\nStatus: {st}\nTime: {fmt_local_time(now)}\n\nThermoIQ Temperature Monitoring")
+                    text=f"ALARM {d['name']} {'HIGH' if d['alarm_type']=='high' else 'LOW'} TEMP {temp:.1f}C (limit {d['limit']:.1f}C) {now.astimezone(PLANT_TZ):%H:%M}"
+                    _queue_notifications(ncfg,f"PBF Temperature Alarm - {d['name']}",body,text,eid)
             elif current and previous is True:
-                update_active_downtime(sn,temp)
+                rec=update_active_downtime(sn,temp)
                 last_sent=email_alarm_last_sent.get(sn)
                 if last_sent is None or (now-last_sent).total_seconds() >= 300:
                     email_alarm_last_sent[sn]=now; started=email_alarm_started.get(sn,now)
@@ -1781,6 +1944,7 @@ def process_email_notifications(devices):
                           f"Status: {st} - STILL ACTIVE\nAlarm Active: {mins} minutes\nTime: {fmt_local_time(now)}\n\nThermoIQ Temperature Monitoring")
                     text=f"STILL ACTIVE {mins} min: {d['name']} {temp:.1f}C (limit {d['limit']:.1f}C)"
                     _queue_notifications(ncfg,f"PBF Temperature Alarm 5-Min Reminder - {d['name']}",body,text,eid)
+                _maybe_escalate(d,temp,now,ncfg,rec,bool(acked_map.get(sn)))
             elif not current and previous is True:
                 started=email_alarm_started.pop(sn,None); email_alarm_last_sent.pop(sn,None); clear_ack(sn)
                 # If the temperature is still outside the limit but monitoring was intentionally
@@ -1788,9 +1952,14 @@ def process_email_notifications(devices):
                 # 'return to normal' message. Log the suspension instead.
                 if bool(d.get("raw_alarm")) and not bool(d.get("effective_monitoring_enabled",True)):
                     reason=d.get("suppression_reason") or "Alarm monitoring disabled"
-                    close_downtime(sn,now,temp,"ALARM NOTIFICATION SUSPENDED - "+reason)
+                    closed=close_downtime(sn,now,temp,"ALARM NOTIFICATION SUSPENDED - "+reason)
                     add_event(sn,d["name"],"ALARM NOTIFICATION SUSPENDED",temp,d["limit"],d["alarm_type"],
                               detail=f"Temperature still outside limit; {reason}")
+                    _tell_supervisors(ncfg,closed,f"PBF Alarm Notifications Suspended - {d['name']}",
+                                      (f"PBF TEMPERATURE ALARM - NOTIFICATIONS SUSPENDED\n\nEquipment: {d['name']}\n"
+                                       f"Temperature: {temp:.1f} C (still outside the limit)\nReason: {reason}\nTime: {fmt_local_time(now)}\n\n"
+                                       "ThermoIQ Temperature Monitoring"),
+                                      f"SUSPENDED {d['name']} {temp:.1f}C still out of limit - {reason}")
                 else:
                     closed_episode=close_downtime(sn,now,temp,"RETURN TO NORMAL")
                     if closed_episode:
@@ -1801,8 +1970,120 @@ def process_email_notifications(devices):
                     body=(f"PBF TEMPERATURE NORMAL\n\nEquipment: {d['name']}\nTemperature: {temp:.1f} C\nStatus: RETURNED TO NORMAL\nAlarm Duration: {duration}\nTime: {fmt_local_time(now)}\n\nThermoIQ Temperature Monitoring")
                     text=f"NORMAL {d['name']} {temp:.1f}C - alarm cleared after {duration}"
                     _queue_notifications(ncfg,f"PBF Temperature Normal - {d['name']}",body,text,eid)
+                    _tell_supervisors(ncfg,closed_episode,f"PBF Temperature Normal - {d['name']}",body,text)
             email_alarm_state[sn]=current
 
+# ---------------------------------------------------------------------------
+# U8: no-data alarm (a logger sends no readings) and LI-COR connection alarm.
+# Threshold: Settings -> Alarm notifications -> "No-data alert" (0 = OFF).
+# Sent to the normal alarm recipients whatever the alarm schedule says, because
+# the temperature record has a gap either way. Loggers in NOT IN USE are skipped.
+# ---------------------------------------------------------------------------
+NO_DATA_STATE_FILE=DATA_DIR/"no_data_state.json"
+no_data_lock=threading.Lock()
+_ALERT_KEYS=("alerted_at","alert_last_seen")
+
+def _gap_text(minutes):
+    minutes=int(minutes)
+    return f"{minutes} min" if minutes<120 else f"{minutes//60} h {minutes%60:02d} min"
+
+def process_no_data(devices, now=None):
+    if not NOTIFICATIONS_ENABLED:
+        return
+    now=now or datetime.now(timezone.utc)
+    ncfg=load_notification_config(); limit=ncfg["no_data_minutes"]
+    email_state,text_state=_channel_states(ncfg)
+    lost=[]; back=[]
+    with no_data_lock:
+        st=_read_json(NO_DATA_STATE_FILE,{})
+        if not isinstance(st,dict): st={}
+        rows=st.setdefault("loggers",{})
+        for d in devices:
+            sn=d["logger_sn"]; row=rows.setdefault(sn,{})
+            ts=_iso_dt(d.get("timestamp"))
+            if ts:
+                row["last_seen"]=ts.isoformat(); row.pop("missing_since",None)
+            elif not row.get("last_seen") and not row.get("missing_since"):
+                row["missing_since"]=now.isoformat()
+            since=_iso_dt(row.get("last_seen") or row.get("missing_since")) or now
+            gap=(now-since).total_seconds()/60
+            in_use=bool(d.get("monitoring_enabled",True))
+            if row.get("alerted_at"):
+                alert_seen=_iso_dt(row.get("alert_last_seen"))
+                if ts and (alert_seen is None or ts>alert_seen):
+                    back.append(d)                      # a new reading arrived
+                    for k in _ALERT_KEYS: row.pop(k,None)
+                elif not in_use or limit==0:
+                    for k in _ALERT_KEYS: row.pop(k,None)   # switched off: forget quietly
+            elif in_use and limit and gap>=limit:
+                row["alerted_at"]=now.isoformat(); row["alert_last_seen"]=since.isoformat()
+                lost.append((d,since,gap))
+        _write_json(NO_DATA_STATE_FILE,st)
+    if lost:
+        ids=[add_event(d["logger_sn"],d["name"],"NO DATA ALARM",None,d.get("limit"),d.get("alarm_type"),email_state,text_state,
+                       f"No reading for {_gap_text(gap)}; last reading {_pt_text(since)}",category="ALARM")
+             for d,since,gap in lost]
+        names=", ".join(d["name"] for d,_,_ in lost)
+        body=("PBF TEMPERATURE MONITORING - NO DATA\n\n"
+              "These loggers have sent no readings to LI-COR Cloud. Temperatures are not being\n"
+              "recorded and alarms cannot be raised for them until data comes back.\n\n"
+              +"\n".join(f"- {d['name']}: no reading for {_gap_text(gap)} (last reading {_pt_text(since)})" for d,since,gap in lost)
+              +"\n\nCheck the logger and the gateway: power, batteries, Wi-Fi / internet at the plant.\n"
+              f"Time: {fmt_local_time(now)}\n\nThermoIQ Temperature Monitoring")
+        text=f"NO DATA {limit}+ min: {names}. Check logger/gateway power and internet."
+        _queue_notifications(ncfg,f"PBF No Data - {names}",body,text,ids)
+    if back:
+        ids=[add_event(d["logger_sn"],d["name"],"DATA RESTORED",d.get("temperature"),d.get("limit"),d.get("alarm_type"),
+                       email_state,text_state,"Readings are arriving again",category="ALARM") for d in back]
+        names=", ".join(d["name"] for d in back)
+        body=("PBF TEMPERATURE MONITORING - DATA RESTORED\n\nReadings are arriving again from:\n"
+              +"\n".join(f"- {d['name']}"+(f": {float(d['temperature']):.1f} C" if d.get("temperature") is not None else "") for d in back)
+              +f"\n\nTime: {fmt_local_time(now)}\n\nThermoIQ Temperature Monitoring")
+        _queue_notifications(ncfg,f"PBF Data Restored - {names}",body,f"DATA RESTORED: {names}",ids)
+
+def licor_status_update(ok, error="", now=None):
+    """Track LI-COR Cloud failures; alert once when it has failed for the no-data time."""
+    now=now or datetime.now(timezone.utc)
+    alert=restored=None
+    with no_data_lock:
+        st=_read_json(NO_DATA_STATE_FILE,{})
+        if not isinstance(st,dict): st={}
+        lc=st.setdefault("licor",{})
+        if ok:
+            if not lc.get("fail_since"):
+                return
+            if lc.get("alerted_at"): restored=_iso_dt(lc.get("fail_since"))
+            st["licor"]={}
+        else:
+            lc["fail_since"]=lc.get("fail_since") or now.isoformat()
+            lc["last_error"]=str(error)[:200]
+            minutes=load_notification_config()["no_data_minutes"]; since=_iso_dt(lc["fail_since"]) or now
+            if (NOTIFICATIONS_ENABLED and minutes and not lc.get("alerted_at")
+                    and (now-since).total_seconds()>=minutes*60):
+                lc["alerted_at"]=now.isoformat(); alert=since
+        _write_json(NO_DATA_STATE_FILE,st)
+    if not NOTIFICATIONS_ENABLED or not (alert or restored):
+        return
+    ncfg=load_notification_config(); email_state,text_state=_channel_states(ncfg)
+    if alert:
+        gap=_gap_text((now-alert).total_seconds()/60)
+        eid=add_event("LICOR","LI-COR Cloud","LI-COR CONNECTION LOST",email=email_state,push=text_state,
+                      detail=f"No answer from LI-COR Cloud for {gap}: {str(error)[:150]}",category="ALARM")
+        body=("PBF TEMPERATURE MONITORING - LI-COR CONNECTION LOST\n\n"
+              f"ThermoIQ has not been able to read data from LI-COR Cloud since {_pt_text(alert)} ({gap}).\n"
+              "No alarms can be raised for any logger until the connection is back.\n\n"
+              f"Last error: {str(error)[:200]}\n\n"
+              "Check the LI-COR Cloud website and the API token / subscription.\n"
+              f"Time: {fmt_local_time(now)}\n\nThermoIQ Temperature Monitoring")
+        _queue_notifications(ncfg,"PBF LI-COR Connection Lost",body,f"LI-COR CONNECTION LOST {gap} - no alarms possible. Check LI-COR Cloud.",eid)
+    else:
+        gap=_gap_text((now-restored).total_seconds()/60)
+        eid=add_event("LICOR","LI-COR Cloud","LI-COR CONNECTION RESTORED",email=email_state,push=text_state,
+                      detail=f"Connection back after {gap}",category="ALARM")
+        body=("PBF TEMPERATURE MONITORING - LI-COR CONNECTION RESTORED\n\n"
+              f"ThermoIQ is reading data from LI-COR Cloud again (it was down for {gap}).\n"
+              f"Time: {fmt_local_time(now)}\n\nThermoIQ Temperature Monitoring")
+        _queue_notifications(ncfg,"PBF LI-COR Connection Restored",body,f"LI-COR connection restored after {gap}",eid)
 
 LOGGERS={
 "21387391":{"id":"L1","name":"Tortilla L1 Cooler","alarm_type":"high","limit":13.0},
@@ -1813,12 +2094,12 @@ LOGGERS={
 "22547310":{"id":"BP2","name":"Bagel Proofer 2","alarm_type":"low","limit":30.0},
 "22212731":{"id":"PLANT","name":"PBF Plant Temperature","model":"MX1101","alarm_type":"monitor","limit":0.0}}
 
-app=FastAPI(title="ThermoIQ - PBF Burnaby Temperature Dashboard v6.6.0 Cloud Edition")
+app=FastAPI(title="ThermoIQ - PBF Burnaby Temperature Dashboard v6.7.0 Cloud Edition")
 
 @app.get("/api/deployment-status")
 def api_deployment_status():
     return {
-        "version":"6.6.0",
+        "version":"6.7.0",
         "edition":"OVH Cloud",
         "deployment_role":DEPLOYMENT_ROLE,
         "automatic_notifications_enabled":NOTIFICATIONS_ENABLED,
@@ -1930,7 +2211,13 @@ async def dashboard_history():
 
 @app.get("/api/current")
 async def current():
-    rows=await getdata(list(LOGGERS),40); latest={}
+    try:
+        rows=await getdata(list(LOGGERS),40)
+    except Exception as e:
+        licor_status_update(False,getattr(e,"detail",None) or repr(e))
+        raise
+    licor_status_update(True)
+    latest={}
     for q in rows:
         sn=str(q.get("logger_sn","")); typ=str(q.get("sensor_measurement_type","")).lower()
         if sn in LOGGERS and typ in ("temperature","rh"):
@@ -1976,6 +2263,7 @@ async def current():
                     "raw_alarm":raw_alarm,"alarm_suppressed":bool(raw_alarm and not effective_monitoring),
                     "alarm":alarm,"acked":acked})
     process_email_notifications(out)
+    process_no_data(out,now)
     # Refresh acknowledgement values in case a new transition cleared one.
     ackmap=get_alarm_state().get("acked",{})
     for d in out: d["acked"]=bool(ackmap.get(d["logger_sn"],False)) if d["alarm"] else False
@@ -1987,7 +2275,7 @@ async def v501_status():
     """Small diagnostic endpoint for the v5.0.1 communication/alarm panels."""
     cur = await current()
     return {
-        "version": "6.6.0",
+        "version": "6.7.0",
         "logger_count": len(cur.get("devices", [])),
         "loggers": [{"name": d.get("name"), "logger_sn": d.get("logger_sn"), "comm_status": d.get("comm_status"), "age_minutes": d.get("age_minutes")} for d in cur.get("devices", [])],
         "alarm_event_count": db_count_events(),
@@ -2263,19 +2551,40 @@ async def admin_save_notifications(request: Request):
     if old["email_enabled"]!=new["email_enabled"]: changes.append("email alerts "+("ON" if new["email_enabled"] else "OFF"))
     if old["sms_enabled"]!=new["sms_enabled"]: changes.append("text alerts "+("ON" if new["sms_enabled"] else "OFF"))
     if old["sender_name"]!=new["sender_name"]: changes.append(f"sender name: {new['sender_name']}")
+    if old["no_data_minutes"]!=new["no_data_minutes"]:
+        changes.append("no-data alert "+(f"after {new['no_data_minutes']} min" if new["no_data_minutes"] else "OFF"))
+    if old["escalation_minutes"]!=new["escalation_minutes"]:
+        changes.append("escalation "+(f"after {new['escalation_minutes']} min" if new["escalation_minutes"] else "OFF"))
+    if old["escalation_email_recipients"]!=new["escalation_email_recipients"]:
+        changes.append(f"supervisor email recipients: {len(new['escalation_email_recipients'])}")
+    if old["escalation_sms_recipients"]!=new["escalation_sms_recipients"]:
+        changes.append(f"supervisor text recipients: {len(new['escalation_sms_recipients'])}")
     if changes:
         add_event("CONFIG","Notifications","NOTIFICATION SETTINGS CHANGED",
                   detail="; ".join(changes)+f" by {user}",actor=info["username"],role=info["role"],category="CONFIG")
     return {"ok":True,"notification_config":notification_settings_payload()}
 
+async def _test_group(request):
+    """The notification config when a test is for the supervisor list ({"group":"escalation"}), else None."""
+    try:
+        data=await request.json()
+    except Exception:
+        data={}
+    return load_notification_config() if isinstance(data,dict) and data.get("group")=="escalation" else None
+
 @app.post("/api/admin/notifications/test-email")
 async def admin_test_notification_email(request: Request):
     info=require_right(request,"change_notifications")
     now=datetime.now(timezone.utc)
-    body=(f"THERMOIQ TEST EMAIL\n\nThis is a test of the alarm email recipients.\n"
+    sup=await _test_group(request)
+    who="supervisor (escalation) email" if sup is not None else "alarm email"
+    if sup is not None and not sup["escalation_email_recipients"]:
+        raise HTTPException(status_code=400,detail="No supervisor email recipients are saved")
+    body=(f"THERMOIQ TEST EMAIL\n\nThis is a test of the {who} recipients.\n"
           f"Sent by: {info['username']}\nTime: {fmt_local_time(now)}\n\nThermoIQ Temperature Monitoring")
     try:
-        sent,errors=await asyncio.to_thread(send_email,"ThermoIQ Test Email",body)
+        sent,errors=await asyncio.to_thread(send_email,"ThermoIQ Test Email",body,
+                                            sup["escalation_email_recipients"] if sup is not None else None)
     except Exception as e:
         email_status["last_error"]=str(e)
         raise HTTPException(status_code=500,detail=f"Email send failed: {e}")
@@ -2287,9 +2596,13 @@ async def admin_test_notification_email(request: Request):
 async def admin_test_notification_text(request: Request):
     require_right(request,"change_notifications")
     now=datetime.now(timezone.utc)
-    message=f"ThermoIQ TEST text alert. Alarms will look like this. {now.astimezone(PLANT_TZ):%H:%M}"
+    sup=await _test_group(request)
+    if sup is not None and not sup["escalation_sms_recipients"]:
+        raise HTTPException(status_code=400,detail="No supervisor text recipients are saved")
+    message=(f"ThermoIQ TEST supervisor text. Unacknowledged alarms will look like this. {now.astimezone(PLANT_TZ):%H:%M}"
+             if sup is not None else f"ThermoIQ TEST text alert. Alarms will look like this. {now.astimezone(PLANT_TZ):%H:%M}")
     try:
-        sent,errors=await asyncio.to_thread(send_text,message)
+        sent,errors=await asyncio.to_thread(send_text,message,sup["escalation_sms_recipients"] if sup is not None else None)
     except Exception as e:
         text_status["last_error"]=str(e)
         raise HTTPException(status_code=500,detail=f"Text message failed: {e}")
@@ -2484,6 +2797,13 @@ async def acknowledge_alarm(sn:str, request: Request):
     role=info.get("role","dashboard") if info else "dashboard"
     add_event(sn,cfg["name"],"ALARM ACKNOWLEDGED",None,cfg["limit"],cfg["alarm_type"],
               detail=f"Acknowledged by {who} from dashboard",actor=who,role=role,category="ALARM")
+    if NOTIFICATIONS_ENABLED:
+        # An alarm already escalated: let the supervisors know someone has it in hand.
+        _tell_supervisors(load_notification_config(),active_downtime(sn),f"PBF Alarm Acknowledged - {cfg['name']}",
+                          (f"PBF TEMPERATURE ALARM - ACKNOWLEDGED\n\nEquipment: {cfg['name']}\nAcknowledged by: {who}\n"
+                           f"Time: {fmt_local_time(now)}\n\nThe alarm is still active until the temperature is back within the limit.\n\n"
+                           "ThermoIQ Temperature Monitoring"),
+                          f"ACK {cfg['name']} by {who[:30]} {now.astimezone(PLANT_TZ):%H:%M}")
     return {"ok":True,"logger_sn":sn,"acknowledged_by":who}
 
 @app.get("/api/audit/status")
@@ -2492,7 +2812,7 @@ def audit_status(request: Request):
     now=datetime.now(timezone.utc)
     cfg=load_audit_config()
     return {
-        "version":"6.6.0",
+        "version":"6.7.0",
         "server_utc":now.isoformat(),
         "server_pacific":now.astimezone(PLANT_TZ).isoformat(),
         "timezone":"America/Vancouver",
@@ -2743,7 +3063,7 @@ async def build_maintenance_report_csv(hours=24,end_utc=None):
     output=io.StringIO(newline="")
     w=csv.writer(output)
     w.writerow(["PBF RISE BAKING BURNABY - TEMPERATURE ALARM DOWNTIME REPORT"])
-    w.writerow(["Report Version","v6.6.0"])
+    w.writerow(["Report Version","v6.7.0"])
     w.writerow(["Report Window Start (Pacific)",_pt_text(start_utc)])
     w.writerow(["Report Window End (Pacific)",_pt_text(end_utc)])
     w.writerow(["Window Hours",hours])
@@ -3062,7 +3382,8 @@ async def maybe_send_daily_maintenance_report():
 CAL_REMINDER_STATE_FILE=DATA_DIR/"calibration_reminder_state.json"
 PERIOD_LABELS={"last-week":"Weekly","this-week":"Weekly (to date)","last-month":"Monthly","this-month":"Monthly (to date)"}
 EVENT_KINDS={
-    "ALARM":r"TEMPERATURE ALARM|REMINDER","ACK":r"ACKNOWLEDGED","NORMAL":r"RETURN TO NORMAL",
+    "ALARM":r"TEMPERATURE ALARM|REMINDER|NO DATA|CONNECTION LOST|ESCALATED","ACK":r"ACKNOWLEDGED",
+    "NORMAL":r"RETURN TO NORMAL|DATA RESTORED|CONNECTION RESTORED|EPISODE CLOSED",
     "CHANGE":r"CHANGED|ENABLED|DISABLED|ADDED|REMOVED|RESET|SUSPENDED","LOGIN":r"LOGIN|LOGOUT|LOCKED"}
 
 def _filter_kind(rows,kind):
@@ -3420,7 +3741,7 @@ def build_period_report_xlsx(daily,start_utc,end_utc,first_day,last_day,label,su
     period_text=f"{first_day.isoformat()} to {last_day.isoformat()}"
     ws.append([f"PBF RISE BAKING BURNABY - {label.upper()} TEMPERATURE QA REPORT"]); ws["A1"].font=st["title"]
     for k,v in (("Period (Pacific days)",period_text),("Window start",_pt_text(start_utc)),("Window end",_pt_text(end_utc)),
-                ("Generated",_pt_text(datetime.now(timezone.utc))),("Report version","v6.6.0"),
+                ("Generated",_pt_text(datetime.now(timezone.utc))),("Report version","v6.7.0"),
                 ("Reading basis","Calibrated / offset-adjusted LI-COR readings"),
                 ("Limits","Readings beyond the limit use each logger's current alarm limit; minutes in alarm come from the alarm history"),
                 ("Days","Pacific calendar days; the current day is included up to the time the report was made")):
@@ -4311,12 +4632,27 @@ async def history(sn:str,minutes:int=60,start:str="",end:str=""):
     return {"logger":get_runtime_cfg(sn),"data":[calibrated_row(q) for q in rows]}
 
 
+monitor_health={"started":datetime.now(timezone.utc),"last_loop":None}
+MONITOR_STALE_SECONDS=300
+
+@app.get("/healthz")
+def healthz():
+    """U9: for an outside uptime monitor. 200 while the background alarm monitor keeps
+    running, 503 when it has not finished a cycle for 5 minutes. Reveals nothing else, so
+    Caddy may serve it without the viewer login (cloud/allow_healthz.sh)."""
+    last=monitor_health["last_loop"] or monitor_health["started"]
+    ok=(datetime.now(timezone.utc)-last).total_seconds()<MONITOR_STALE_SECONDS
+    return JSONResponse({"status":"ok" if ok else "alarm monitor stalled"},status_code=200 if ok else 503,
+                        headers={"Cache-Control":"no-store"})
+
 @app.on_event("startup")
 async def start_email_monitor():
     async def monitor():
         await asyncio.sleep(5)
         while True:
             try:
+                # A LI-COR failure is recorded by licor_status_update (inside current()) and
+                # skips the reports this cycle; the loop itself is still counted as alive.
                 await current()
                 await maybe_send_daily_maintenance_report()
                 await maybe_send_period_reports()
@@ -4325,5 +4661,6 @@ async def start_email_monitor():
                 await maybe_daily_audit_maintenance()
             except Exception as e:
                 print("Background LI-COR/email/report monitor error:",repr(e))
+            monitor_health["last_loop"]=datetime.now(timezone.utc)
             await asyncio.sleep(60)
     asyncio.create_task(monitor())
